@@ -4,6 +4,7 @@
 //! terminal is a mod. Commands (commands.rs) are the one way to change
 //! anything: keys, mods, menus and agents all run them.
 
+use crate::arrangement::{self, Arrangement};
 use crate::hc::Core;
 mod floats;
 mod movable;
@@ -31,6 +32,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 const HEADER_HEIGHT: f32 = 30.0;
 const HANDLE: f32 = 6.0;
+const STACK_BAR_HEIGHT: f32 = 26.0;
+const FLOAT_BORDER: f32 = 3.0;
+const FLOAT_PADDING: f32 = 6.0;
 
 // The three native buttons plus their trailing breathing room (also used by the tabs mod).
 const TRAFFIC_LIGHT_WIDTH: f32 = 64.0;
@@ -846,6 +850,7 @@ impl AppWindow {
             mods::note_fonts(cx);
         }
         let s = settings::Settings::compose(&self.person, &self.chrome.look, self.system_dark);
+        self.model.default_arrangement = s.new_tab_arrangement();
         let problems = s.problems();
         if !problems.is_empty() {
             self.report_layout(&problems.join("; "));
@@ -1196,7 +1201,8 @@ impl AppWindow {
                 HeaderContent::Mod { name, props } => Some((name.clone(), props.clone())),
                 HeaderContent::Builtin(_) => None,
             });
-            for n in c.shown().visible_blocks() {
+            let floats = self.model.active_space().and_then(|p| p.shown_floats());
+            for n in c.shown().visible_blocks().into_iter().chain(floats.into_iter().flat_map(|f| f.shown().visible_blocks())) {
                 if let Some((name, props)) = &header
                     && n.is_pane()
                 {
@@ -1382,6 +1388,10 @@ impl AppWindow {
 
     /// Creates what's visible, drops what isn't, publishes state, saves, focuses.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let doomed = std::mem::take(&mut self.model.doomed);
+        if !doomed.is_empty() {
+            self.kill(&doomed, cx);
+        }
         self.model.order_spaces();
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
@@ -1463,7 +1473,7 @@ impl AppWindow {
         }
         // Mod blocks too, so `pane.go` goes back to a mod it came from.
         self.pane_history.retain(|id| {
-            self.copies.contains_key(id) || self.model.spaces.iter().any(|s| s.tabs.iter().any(|t| t.root.find(id).is_some()))
+            self.copies.contains_key(id) || self.model.tab_of(id).is_some()
         });
         if let Some(id) = self.focused_block.as_ref().or(model_pane.as_ref()) {
             remember_pane(&mut self.pane_history, id);
@@ -1708,13 +1718,15 @@ impl AppWindow {
         let mut agents = Vec::new();
         let mut panes = Vec::new();
         for pr in &m.spaces {
-            for (ci, ctx) in pr.tabs.iter().enumerate() {
+            let tabs = pr.tabs.iter().enumerate().map(|(i, t)| (Some(i), t)).chain(pr.floats.iter().map(|t| (None, t)));
+            for (ci, ctx) in tabs {
+                let float = ci.is_none();
                 for p in ctx.root.panes() {
                     let focused = m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str());
                     let zoomed = ctx.zoomed.as_deref() == Some(p.id.as_str());
                     // A mod pane: what it shows, no terminal.
                     if let Some(Content::Mod { name, .. }) = p.content() {
-                        panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "title": name, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
+                        panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "float": float, "title": name, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
                         continue;
                     }
                     let Some(addr) = p.terminal() else { continue };
@@ -1723,7 +1735,7 @@ impl AppWindow {
                         self.live.get(addr).and_then(|r| r.get("title")).and_then(Value::as_str).map(str::to_owned)
                     });
                     panes.push(json!({
-                        "pane": p.id, "terminal": addr, "tab": ctx.id, "title": title.clone().unwrap_or_default(),
+                        "pane": p.id, "terminal": addr, "tab": ctx.id, "float": float, "title": title.clone().unwrap_or_default(),
                         "cwd": self.cwds.get(addr), "branch": m.folder_info.get(addr).and_then(|f| f.branch.clone()),
                         "status": m.status(addr), "app": a.and_then(|a| a.app.clone()), "program": self.program(addr),
                         "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id),
@@ -1731,7 +1743,8 @@ impl AppWindow {
                     let Some(status) = m.status(addr) else { continue };
                     agents.push(json!({
                         "address": addr, "pane": p.id, "space": pr.id, "space_name": m.space_name(pr, &home),
-                        "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx),
+                        "tab": ctx.id, "float": float, "tab_index": ci.map_or(0, |i| i + 1),
+                        "tab_name": if float { "floats".to_owned() } else { Model::tab_name(pr, ctx) },
                         "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
                         "seq": a.map(|a| a.seq).unwrap_or(0),
                         "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
@@ -1741,7 +1754,7 @@ impl AppWindow {
             }
         }
         let focused = m.active_space().and_then(|p| {
-            let ctx = p.active_tab()?;
+            let ctx = p.focused_tab()?;
             if let Some(block) = block {
                 let address = block.terminal()?;
                 return Some(json!({ "space": p.id, "tab": ctx.id, "pane": null, "terminal": address,
@@ -1783,6 +1796,9 @@ impl AppWindow {
                 for a in model::addresses(&c.root) {
                     want.insert(a, format!("{name} / {}", Model::tab_name(p, c)));
                 }
+            }
+            for a in p.floats.iter().flat_map(|f| model::addresses(&f.root)) {
+                want.insert(a, format!("{name} / floats"));
             }
         }
         for addr in self.live.keys() {
@@ -2207,7 +2223,7 @@ impl AppWindow {
             let before = tab.before.clone();
             let zoomed = tab.zoomed.clone();
             let id = tab.id.clone();
-            self.model.split(&target, Axis::Row, &pane, addr);
+            self.model.add_pane(&target, model::pane(&pane, addr));
             let tab = self.model.tab_mut(&id).unwrap();
             tab.focused = focused;
             tab.before = before;
@@ -2499,6 +2515,53 @@ impl AppWindow {
         let new = self.model.fresh_id_on("p", machine.as_deref());
         self.model.split_with(&target, axis, Node::block(new.clone(), Content::Mod { name, props }));
         Ok(json!({ "pane": new }))
+    }
+
+    /// A terminal after a pane, the way its tab is laid out (pane.add).
+    fn add_pane(&mut self, pane: Option<String>, argv: Option<Vec<String>>, folder: Option<String>, window: &Window) -> Result<Value, String> {
+        let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to add after")?;
+        let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
+        let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
+        let target_addr = self.model.address_of(&target);
+        let follow = folder.is_none();
+        let cwd = folder.unwrap_or_else(|| target_addr.as_ref().and_then(|a| self.cwds.get(a).cloned()).unwrap_or(fallback));
+        let on = target_addr.and_then(|a| a.split_once('/').map(|(m, _)| m.to_owned())).or_else(|| self.machine_of(&space));
+        let new = self.model.fresh_id_on("p", on.as_deref());
+        let size = self.model.active_tab().filter(|tab| tab.id == ctx)
+            .and_then(|tab| self.initial_size(&added_root(tab, &target, &new, self.model.aspect), &new, window));
+        let (addr, _) = self.spawn(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
+        self.model.add_pane(&target, model::pane(&new, &addr));
+        Ok(json!({ "pane": new, "terminal": addr }))
+    }
+
+    /// A mod after a pane, the way its tab is laid out (pane.add with mod).
+    fn add_mod_pane(&mut self, pane: Option<String>, name: String, props: Value) -> Result<Value, String> {
+        let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to add after")?;
+        if self.model.tab_of(&target).is_none() {
+            return Err(format!("no pane {target:?}"));
+        }
+        if !self.folders.contains_key(&name) {
+            return Err(format!("no mod {name:?} in mods/"));
+        }
+        let machine = self.model.space_of(&target).and_then(|s| s.machine.clone());
+        self.require_document(machine.as_deref())?;
+        let new = self.model.fresh_id_on("p", machine.as_deref());
+        self.model.add_pane(&target, Node::block(new.clone(), Content::Mod { name, props }));
+        Ok(json!({ "pane": new }))
+    }
+
+    /// A terminal floating over a space's tabs (float.new).
+    fn new_float(&mut self, space: Option<String>, argv: Option<Vec<String>>, folder: Option<String>, window: &Window) -> Result<Value, String> {
+        let space = space.or_else(|| self.model.active.clone()).ok_or("no space yet: make one first (space.new)")?;
+        let Some(p) = self.model.space(&space) else { return Err(format!("no space {space:?}")) };
+        let on = p.machine.clone();
+        let layer = p.floats.as_ref().map(|f| f.id.clone()).unwrap_or_else(|| self.model.fresh_id_on("fl", on.as_deref()));
+        let follow = folder.is_none();
+        let folder = folder.unwrap_or_else(|| self.folder_for(&space));
+        let pane = self.model.fresh_id_on("p", on.as_deref());
+        let (addr, _) = self.spawn(argv, folder, follow, &space, &layer, on.as_deref(), None, window)?;
+        self.model.add_float(&space, &layer, model::pane(&pane, &addr));
+        Ok(json!({ "space": space, "floats": layer, "pane": pane, "terminal": addr }))
     }
 
     /// Ask only whether a missing terminal is closed. Core owns restarting it.
@@ -2803,8 +2866,8 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "terminal.keep" | "terminal.park") {
-            let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "tab.arrange" | "pane.split" | "pane.add" | "pane.close" | "pane.swap" | "float.new" | "float.toggle" | "terminal.keep" | "terminal.park") {
+            let node = ["id", "space", "pane", "tab"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
                 else if name == "terminal.park" { Self::arg(&args, "terminal").and_then(|a| a.split_once('/').map(|(m, _)| m)) }
@@ -2816,6 +2879,9 @@ impl AppWindow {
             && let Err(error) = self.require_document(space.machine.as_deref())
         { return json!({"error":error}); }
         self.reply = None;
+        if let Some((_, area)) = self.context_area() {
+            self.model.aspect = f32::from(area.width) / f32::from(area.height);
+        }
         self.dispatch(name, &args, person, window, cx);
         self.flush_documents(false, window, cx);
         self.reply.take().unwrap_or_else(|| json!({ "ok": true }))
@@ -2917,6 +2983,11 @@ impl AppWindow {
             }
             "tab.close" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to close") };
+                if self.model.is_floats(&id) {
+                    let (addrs, _) = self.model.remove_tab(&id);
+                    self.kill(&addrs, cx);
+                    return self.sync(window, cx);
+                }
                 let Some(p) = self.model.space_of(&id) else { return self.fail(format!("no tab {id:?}")) };
                 // The last tab takes its space with it: ask like closing the space.
                 if p.tabs.len() == 1 {
@@ -2937,7 +3008,7 @@ impl AppWindow {
                 let (Some(id), Some(i)) = (Self::arg(a, "id"), a.get("index").and_then(Value::as_u64)) else { return self.fail("tab.move needs id and index") };
                 let Some(pid) = self.model.space_of(id).map(|p| p.id.clone()) else { return self.fail(format!("no tab {id:?}")) };
                 let p = self.model.space_mut(&pid).unwrap();
-                let from = p.tabs.iter().position(|c| c.id == id).unwrap();
+                let Some(from) = p.tabs.iter().position(|c| c.id == id) else { return self.fail(format!("{id:?} is a space's floats, not a tab")) };
                 let c = p.tabs.remove(from);
                 let to = (i as usize).saturating_sub(1).min(p.tabs.len());
                 p.tabs.insert(to, c);
@@ -2989,13 +3060,61 @@ impl AppWindow {
                 if c.root.find(&pane).is_some_and(|n| !n.closable()) {
                     return;
                 }
-                if c.root.panes().len() == 1 {
+                if c.root.panes().len() == 1 && !self.model.is_floats(&c.id) {
                     let id = c.id.clone();
                     return self.dispatch("tab.close", &json!({ "id": id }), person, window, cx);
                 }
                 let addr = self.model.address_of(&pane);
                 self.model.remove_pane(&pane);
                 self.kill(&addr.into_iter().collect::<Vec<_>>(), cx);
+            }
+            "pane.add" => {
+                let r = match Self::owned(a, "mod") {
+                    Some(name) => self.add_mod_pane(Self::owned(a, "pane"), name, a.get("props").cloned().unwrap_or(Value::Null)),
+                    None => self.add_pane(Self::owned(a, "pane"), Self::argv(a), Self::owned(a, "folder"), window),
+                };
+                self.answer(r);
+            }
+            "tab.arrange" => {
+                let tab = Self::owned(a, "tab").or_else(|| self.model.active_space().and_then(|p| p.focused_tab()).map(|t| t.id.clone()));
+                let Some(tab) = tab.filter(|t| self.model.tab(t).is_some()) else { return self.fail("no tab to arrange") };
+                let current = self.model.tab(&tab).and_then(|t| t.arrangement);
+                let wanted = match Self::arg(a, "arrangement").unwrap_or("next") {
+                    "next" => Some(current.map_or(Arrangement::Vertical, Arrangement::next)),
+                    "prev" => Some(current.map_or(Arrangement::Stacked, Arrangement::prev)),
+                    "none" => None,
+                    other => match Arrangement::parse(other) {
+                        Some(x) => Some(x),
+                        None => return self.fail(format!("tab.arrange arrangement is vertical, horizontal, grid, stacked, next, prev or none, not {other:?}")),
+                    },
+                };
+                self.model.arrange(&tab, wanted);
+                self.answer(Ok(json!({ "tab": tab, "arrangement": wanted.map(Arrangement::name) })));
+            }
+            "float.new" => {
+                let r = self.new_float(Self::owned(a, "space"), Self::argv(a), Self::owned(a, "folder"), window);
+                self.answer(r);
+            }
+            "float.toggle" | "float.show" => {
+                let Some(space) = Self::owned(a, "space").or_else(|| self.model.active.clone()).filter(|s| self.model.space(s).is_some()) else {
+                    return self.fail("no space");
+                };
+                let p = self.model.space(&space).unwrap();
+                let (has, shown, focused) = (p.floats.is_some(), p.floats_shown, p.floats_shown && p.floats_focused);
+                if name == "float.toggle" {
+                    if !has {
+                        let r = self.new_float(Some(space), None, None, window);
+                        self.answer(r);
+                    } else {
+                        self.model.show_floats(&space, !focused, !focused);
+                    }
+                } else {
+                    if !has {
+                        return self.fail("this space has no floats: open one with float.new");
+                    }
+                    let show = a.get("shown").and_then(Value::as_bool).unwrap_or(!shown);
+                    self.model.show_floats(&space, show, focused && show);
+                }
             }
             "pane.zoom" => {
                 let pane = Self::owned(a, "pane").or_else(|| self.model.focused_pane());
@@ -3423,14 +3542,14 @@ impl AppWindow {
         if self.chrome.find(id).is_some() {
             return self.chrome.find_mut(id);
         }
-        self.model.spaces.iter_mut().flat_map(|p| p.tabs.iter_mut()).find_map(|c| c.root.find_mut(id))
+        self.model.spaces.iter_mut().flat_map(|p| p.tabs.iter_mut().chain(p.floats.iter_mut())).find_map(|c| c.root.find_mut(id))
     }
 
     /// The nearest visible pane, also considering focusable mods for `pane.go`.
     fn neighbor(&self, from: &str, dir: &str, use_history: bool) -> Option<String> {
         let bounds = self.bounds.borrow();
         let cur = *bounds.get(from)?;
-        let mut candidates: Vec<String> = self.model.active_tab().into_iter()
+        let mut candidates: Vec<String> = self.model.active_space().and_then(|p| p.focused_tab()).into_iter()
             .flat_map(|c| c.shown().visible_blocks().into_iter().filter(|n| n.is_pane()).map(|n| n.id.clone()))
             .collect();
         if use_history {
@@ -3478,7 +3597,8 @@ impl AppWindow {
     fn mod_block_shown(&self, id: &str) -> bool {
         self.copies.contains_key(id)
             && (self.chrome.visible_blocks().iter().any(|n| n.id == id && matches!(n.content(), Some(Content::Mod { .. })))
-                || self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id)))
+                || self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id))
+                || self.model.active_space().and_then(|p| p.shown_floats()).is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id)))
     }
 
     /// Its mod.json says `"focusable": true` (`go` asks only of visible blocks).
@@ -3949,7 +4069,7 @@ impl AppWindow {
             if self.pane_term(p).is_some_and(|t| !t.view.read(cx).owns_keyboard_focus(window, cx)) {
                 return out;
             }
-            if let Some(c) = self.model.active_tab()
+            if let Some(c) = self.model.active_space().and_then(|s| s.focused_tab())
                 && let Some(path) = c.root.path_to(p)
             {
                 out.extend(path);
@@ -3962,12 +4082,106 @@ impl AppWindow {
     /// The shown tab block's pane frame, if its panes are framed now: when
     /// the tab is split, or always with `lone`.
     fn pane_frame(&self) -> Option<&PaneFrame> {
+        self.tab_frame(self.model.active_tab()?)
+    }
+
+    /// The shown tab block's pane frame for any tab (the floats too).
+    fn tab_frame(&self, tab: &Tab) -> Option<&PaneFrame> {
         let frame = self.chrome.visible_blocks().into_iter().find_map(|n| match n.content() {
             Some(Content::Context { pane, .. }) => pane.as_ref(),
             _ => None,
         })?;
-        let ctx = self.model.active_tab()?;
-        (frame.lone || ctx.root.panes().len() > 1).then_some(frame)
+        (frame.lone || tab.root.panes().len() > 1).then_some(frame)
+    }
+
+    /// A tab's panes as it lays them out: stacked ones fold to title bars.
+    fn render_tab(&self, tab: &Tab, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
+        let frame = self.tab_frame(tab);
+        let panes = tab.root.panes();
+        if tab.zoomed.is_some() || tab.arrangement != Some(Arrangement::Stacked) || panes.len() < 2 {
+            return self.render_node(tab.shown(), focused, frame, cx);
+        }
+        let open = tab.focused_pane();
+        let gap = frame.and_then(|f| f.gap).unwrap_or(0.0);
+        let mut col = div().size_full().flex().flex_col().gap(settings::z(gap));
+        for n in panes {
+            col = if open.as_deref() == Some(n.id.as_str()) {
+                col.child(div().flex_1().min_h_0().flex().child(self.render_node(n, focused, frame, cx)))
+            } else {
+                col.child(self.stack_bar(n, frame, cx))
+            };
+        }
+        col.into_any_element()
+    }
+
+    /// A folded pane of a stacked tab: its header, or its title, one click from opening.
+    fn stack_bar(&self, n: &Node, frame: Option<&PaneFrame>, cx: &mut Context<Self>) -> AnyElement {
+        let header = frame.and_then(|f| f.header.as_ref()).filter(|h| !h.hover());
+        let border = frame.and_then(|f| pane_size::frame_border(f, false)).map_or(0.0, |l| l.width);
+        let height = header.map_or(STACK_BAR_HEIGHT, pane_size::header_height) + 2.0 * border;
+        let (bounds_map, id) = (self.bounds.clone(), n.id.clone());
+        let mut bar = div()
+            .id(SharedString::from(format!("stack-{}", n.id)))
+            .flex_none()
+            .h(settings::z(height))
+            .w_full()
+            .relative()
+            .flex()
+            .overflow_hidden()
+            .cursor_pointer()
+            .child(canvas(move |b, _, _| { bounds_map.borrow_mut().insert(id, b); }, |_, _, _, _| {}).absolute().size_full());
+        let pane = n.id.clone();
+        bar = bar.on_click(cx.listener(move |this, _, w, cx| this.run("pane.focus", json!({ "pane": pane }), w, cx)));
+        if let (Some(f), Some(_)) = (frame, header) {
+            return bar.child(self.frame_pane(n, f, false, div().into_any_element(), cx)).into_any_element();
+        }
+        let mut row = div().size_full().flex().items_center().px_3().text_xs().text_color(c("muted")).bg(c("raised"));
+        if let Some(f) = frame {
+            if let Some(r) = f.radius {
+                row = row.rounded(settings::z(r));
+            }
+            if let Some(l) = pane_size::frame_border(f, false) {
+                row = row.border(settings::z(l.width)).border_color(c(&l.color));
+            }
+        }
+        bar.child(row.child(self.pane_title(n, cx))).into_any_element()
+    }
+
+    /// What a pane is called on a stack bar: its terminal's title, else what runs there, else its folder.
+    fn pane_title(&self, n: &Node, cx: &App) -> String {
+        if let Some(Content::Mod { name, .. }) = n.content() {
+            return name.clone();
+        }
+        let Some(addr) = n.terminal() else { return String::new() };
+        let title = self.terms.get(&n.id).map(|t| t.view.read(cx).title.clone()).filter(|t| !t.is_empty());
+        title
+            .or_else(|| self.program(addr).get("name").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned))
+            .or_else(|| self.cwds.get(addr).map(|d| model::folder_name(d, &home())))
+            .unwrap_or_else(|| addr.to_owned())
+    }
+
+    /// The space's floats over its tab: a framed box in the middle of the tab area.
+    fn render_float_layer(&self, floats: &Tab, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
+        let s = settings::get();
+        let span = |v: f32| if v <= 1.0 { relative(v) } else { settings::z(v).into() };
+        let (w, h): (DefiniteLength, DefiniteLength) = (span(s.float_width), span(s.float_height));
+        let on = focused.iter().any(|id| floats.root.find(id).is_some());
+        let body = div()
+            .id(SharedString::from(format!("floats-{}", floats.id)))
+            .w(w)
+            .h(h)
+            .max_w_full()
+            .max_h_full()
+            .flex()
+            .p(settings::z(FLOAT_PADDING))
+            .bg(c("background"))
+            .border(settings::z(if on { FLOAT_BORDER } else { FLOAT_BORDER - 1.0 }))
+            .border_color(c("float"))
+            .rounded(settings::z(8.0))
+            .shadow_lg()
+            .occlude()
+            .child(self.render_tab(floats, focused, cx));
+        div().absolute().inset_0().flex().items_center().justify_center().child(body).into_any_element()
     }
 
     /// A pane in its frame: the look, and the header mod above or below it
@@ -4105,7 +4319,13 @@ impl AppWindow {
                     .into_any_element(),
             },
             Content::Context { .. } => match self.model.active_tab() {
-                Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), cx),
+                Some(c) => {
+                    let tab = self.render_tab(c, focused, cx);
+                    match self.model.active_space().and_then(|p| p.shown_floats()).filter(|f| !f.root.panes().is_empty()) {
+                        Some(f) => div().size_full().relative().flex().child(tab).child(self.render_float_layer(f, focused, cx)).into_any_element(),
+                        None => tab,
+                    }
+                }
                 None if self.documents.get("").is_some_and(|s| s.layout() == "loading") => div().size_full().into_any_element(),
                 None => {
                     let key = crate::keys::listing().into_iter().find(|(_, _, a)| a == "space.new").map(|(_, k, _)| format!(" ({k})"));
@@ -4597,7 +4817,7 @@ fn swap_with_neighbor(model: &mut Model, from: &str, explicit: bool, neighbor: O
     if explicit && model.tab_of(from).and_then(|c| c.root.find(from)).is_none_or(|n| !n.is_pane()) {
         return Err(format!("no pane {from:?}"));
     }
-    let shown = model.active_tab().is_some_and(|c| c.shown().visible_blocks().iter().any(|n| n.id == from));
+    let shown = model.active_space().and_then(|p| p.focused_tab()).is_some_and(|c| c.shown().visible_blocks().iter().any(|n| n.id == from));
     if explicit && !shown {
         return Err(format!("pane.swap direction needs a pane in the shown tab, not {from:?}"));
     }
@@ -4623,9 +4843,27 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
     }
 }
 
+/// A tab's tree once `new` is added after `target` (pane.add), to size its program before it starts.
+fn added_root(tab: &Tab, target: &str, new: &str, aspect: f32) -> Node {
+    let block = model::pane(new, "");
+    match tab.arrangement {
+        Some(kind) => {
+            let mut panes: Vec<Node> = tab.root.panes().into_iter().cloned().collect();
+            let at = panes.iter().position(|p| p.id == target).map_or(panes.len(), |i| i + 1);
+            panes.insert(at, block);
+            arrangement::arrange(kind, &tab.root.id, panes, if aspect > 0.0 { aspect } else { 1.6 })
+        }
+        None => {
+            let mut root = tab.root.clone();
+            root.split(target, Axis::Row, block, "initial-size".into());
+            root
+        }
+    }
+}
+
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.split" | "pane.add" | "pane.close" | "pane.zoom" | "pane.swap" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,

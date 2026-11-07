@@ -348,6 +348,7 @@ fn resolve(p: &Palette, overrides: &BTreeMap<String, String>) -> Theme {
         ("working", hex(working)),
         ("blocked", hex(blocked)),
         ("done", hex(done)),
+        ("float", hex(p.ansi[3])),
         ("idle", hex(mix(bg, fg, 0.38))),
         ("unknown", hex(mix(bg, fg, 0.38))),
     ]
@@ -404,6 +405,11 @@ pub struct Person {
     pub theme: Option<crate::layout::ThemeChoice>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub colors: BTreeMap<String, String>,
+    /// How new tabs lay out their panes: vertical, horizontal, grid, stacked, or none (split by hand).
+    pub arrangement: String,
+    /// The floats' size over the tab area: up to 1 a share of it, above 1 px.
+    pub float_width: f32,
+    pub float_height: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -460,6 +466,9 @@ impl Default for Person {
             appearance: Appearance::System,
             theme: None,
             colors: BTreeMap::new(),
+            arrangement: "grid".into(),
+            float_width: 0.9,
+            float_height: 0.9,
         }
     }
 }
@@ -495,6 +504,9 @@ pub struct Settings {
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
+    pub arrangement: String,
+    pub float_width: f32,
+    pub float_height: f32,
 }
 
 /// Attention sounds: when an agent needs you, and when one finished while you
@@ -537,6 +549,9 @@ impl Default for Settings {
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
+            arrangement: "grid".into(),
+            float_width: 0.9,
+            float_height: 0.9,
         }
     }
 }
@@ -575,7 +590,15 @@ impl Settings {
             clipboard_write: person.clipboard_write,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
+            arrangement: person.arrangement.clone(),
+            float_width: person.float_width,
+            float_height: person.float_height,
         }
+    }
+
+    /// How new tabs are laid out; None: split by hand (also for a name `problems` reports).
+    pub fn new_tab_arrangement(&self) -> Option<crate::arrangement::Arrangement> {
+        crate::arrangement::Arrangement::parse(&self.arrangement)
     }
 }
 
@@ -624,6 +647,14 @@ impl Settings {
         }
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
+        }
+        if self.arrangement != "none" && self.new_tab_arrangement().is_none() {
+            out.push(format!("arrangement {:?} is not vertical, horizontal, grid, stacked or none", self.arrangement));
+        }
+        for (k, v) in [("float_width", self.float_width), ("float_height", self.float_height)] {
+            if v.is_nan() || v <= 0.0 {
+                out.push(format!("{k} {v} must be above 0: up to 1 a share of the tab area, above 1 px"));
+            }
         }
         out
     }

@@ -36,7 +36,7 @@ fn inherited_movable(root: &Node, id: &str) -> Option<bool> {
 
 impl AppWindow {
     pub(super) fn pane_movable(&self, pane: &str) -> bool {
-        let Some(tab) = self.model.active_tab() else { return false };
+        let Some(tab) = self.model.tab_of(pane) else { return false };
         if tab.zoomed.is_some() || tab.root.panes().len() < 2 || !tab.root.find(pane).is_some_and(Node::is_pane) {
             return false;
         }
@@ -72,7 +72,9 @@ impl AppWindow {
     }
 
     fn pane_hover(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        let hovered = self.model.active_tab().and_then(|tab| {
+        let space = self.model.active_space();
+        let tabs = space.and_then(|p| p.shown_floats()).into_iter().chain(space.and_then(|p| p.active_tab()));
+        let hovered = tabs.into_iter().find_map(|tab| {
             let bounds = self.bounds.borrow();
             let rows = self.pane_grip_rows.borrow();
             tab.shown().visible_blocks().into_iter().find_map(|n| {
@@ -90,7 +92,7 @@ impl AppWindow {
     pub(super) fn pane_press(&mut self, pane: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
         if self.pane_movable(pane) {
             self.pane_drag = Some(PaneDrag {
-                pane: pane.to_owned(), tab: self.model.active_tab().unwrap().id.clone(),
+                pane: pane.to_owned(), tab: self.model.tab_of(pane).unwrap().id.clone(),
                 down: at, moving: false, target: None,
             });
             cx.notify();
@@ -99,7 +101,7 @@ impl AppWindow {
 
     fn pane_target(&self, at: Point<Pixels>) -> Option<(String, Option<Edge>)> {
         let d = self.pane_drag.as_ref()?;
-        let tab = self.model.active_tab().filter(|t| t.id == d.tab && t.zoomed.is_none())?;
+        let tab = self.model.tab(&d.tab).filter(|t| t.zoomed.is_none())?;
         let bounds = self.bounds.borrow();
         tab.shown().visible_blocks().into_iter().filter(|n| n.is_pane() && n.id != d.pane)
             .find_map(|n| Some((n.id.clone(), drop_zone(*bounds.get(&n.id)?, at)?)))

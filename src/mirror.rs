@@ -1,5 +1,6 @@
 //! Machine-owned layout documents and this screen's private view.
 use crate::{
+    arrangement::Arrangement,
     layout::{Content, Kind, Node},
     model::{Agent, Model, Recent, Space, Tab},
 };
@@ -19,6 +20,8 @@ pub struct SharedSpace {
     name: String,
     folder: String,
     tabs: Vec<SharedTab>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    floats: Option<SharedTab>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -29,6 +32,8 @@ struct SharedTab {
     name: String,
     #[serde(default = "empty_root")]
     root: Node,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    arrangement: Option<Arrangement>,
 }
 
 fn empty_root() -> Node {
@@ -42,6 +47,14 @@ pub struct View {
     tabs: BTreeMap<String, TabView>,
     recent: Vec<Recent>,
     attention: BTreeMap<String, Seen>,
+    #[serde(default)]
+    floats: BTreeMap<String, FloatsView>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct FloatsView {
+    shown: bool,
+    focused: bool,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -86,6 +99,20 @@ fn map_node(node: &mut Node, map: &impl Fn(&str) -> String) {
     }
 }
 
+impl SharedTab {
+    fn capture(t: &Tab, map: &impl Fn(&str) -> String) -> Self {
+        let mut root = t.root.clone();
+        map_node(&mut root, map);
+        SharedTab { id: map(&t.id), name: t.name.clone(), root, arrangement: t.arrangement }
+    }
+
+    fn tab(&self, map: &impl Fn(&str) -> String) -> Tab {
+        let mut root = self.root.clone();
+        map_node(&mut root, map);
+        Tab { id: map(&self.id), name: self.name.clone(), root, focused: None, before: vec![], zoomed: None, settled: None, arrangement: self.arrangement }
+    }
+}
+
 impl Document {
     pub fn capture(model: &Model, machine: Option<&str>) -> Self {
         let map = |s: &str| local(s, machine).to_owned();
@@ -98,15 +125,8 @@ impl Document {
                     id: map(&s.id),
                     name: s.name.clone(),
                     folder: s.folder.clone(),
-                    tabs: s
-                        .tabs
-                        .iter()
-                        .map(|t| {
-                            let mut root = t.root.clone();
-                            map_node(&mut root, &map);
-                            SharedTab { id: map(&t.id), name: t.name.clone(), root }
-                        })
-                        .collect(),
+                    tabs: s.tabs.iter().map(|t| SharedTab::capture(t, &map)).collect(),
+                    floats: s.floats.as_ref().map(|t| SharedTab::capture(t, &map)),
                 })
                 .collect(),
         }
@@ -123,15 +143,10 @@ impl Document {
             folder: s.folder.clone(),
             machine: machine.map(str::to_owned),
             active: None,
-            tabs: s
-                .tabs
-                .iter()
-                .map(|t| {
-                    let mut root = t.root.clone();
-                    map_node(&mut root, &map);
-                    Tab { id: map(&t.id), name: t.name.clone(), root, focused: None, before: vec![], zoomed: None, settled: None }
-                })
-                .collect(),
+            tabs: s.tabs.iter().map(|t| t.tab(&map)).collect(),
+            floats: s.floats.as_ref().map(|t| t.tab(&map)).filter(|t| !t.root.panes().is_empty()),
+            floats_shown: false,
+            floats_focused: false,
         });
         model.spaces.splice(at..at, spaces);
         model.order_spaces();
@@ -147,6 +162,12 @@ impl View {
             spaces: model.spaces.iter().map(|s| (s.id.clone(), s.active.clone())).collect(),
             tabs: model.tabs().map(|t| (t.id.clone(), TabView { focused: t.focused.clone(), before: t.before.clone(), zoomed: t.zoomed.clone(), settled: t.settled })).collect(),
             attention: model.agents.iter().map(|(a, s)| (a.clone(), Seen { word: s.word.clone(), seen: s.seen })).collect(),
+            floats: model
+                .spaces
+                .iter()
+                .filter(|s| s.floats.is_some())
+                .map(|s| (s.id.clone(), FloatsView { shown: s.floats_shown, focused: s.floats_focused }))
+                .collect(),
         }
     }
 
@@ -158,7 +179,10 @@ impl View {
             if let Some(active) = self.spaces.get(&space.id) {
                 merged.spaces.insert(space.id.clone(), active.clone());
             }
-            for tab in &space.tabs {
+            if let Some(floats) = self.floats.get(&space.id) {
+                merged.floats.insert(space.id.clone(), floats.clone());
+            }
+            for tab in space.tabs.iter().chain(space.floats.iter()) {
                 if let Some(view) = self.tabs.get(&tab.id) {
                     merged.tabs.insert(tab.id.clone(), view.clone());
                 }
@@ -191,12 +215,16 @@ impl View {
         self.spaces.extend(saved.spaces.iter().filter(|(id, _)| unloaded(id)).map(|(id, v)| (id.clone(), v.clone())));
         self.tabs.extend(saved.tabs.iter().filter(|(id, _)| unloaded(id)).map(|(id, v)| (id.clone(), v.clone())));
         self.attention.extend(saved.attention.iter().filter(|(id, _)| unloaded(id)).map(|(id, v)| (id.clone(), v.clone())));
+        self.floats.extend(saved.floats.iter().filter(|(id, _)| unloaded(id)).map(|(id, v)| (id.clone(), v.clone())));
     }
 
     pub fn apply(&self, model: &mut Model) {
         for s in &mut model.spaces {
             s.active = self.spaces.get(&s.id).cloned().flatten().filter(|id| s.tab(id).is_some()).or_else(|| s.tabs.first().map(|t| t.id.clone()));
-            for t in &mut s.tabs {
+            let floats = self.floats.get(&s.id).filter(|_| s.floats.is_some()).cloned().unwrap_or_default();
+            s.floats_shown = floats.shown;
+            s.floats_focused = floats.shown && floats.focused;
+            for t in s.tabs.iter_mut().chain(s.floats.iter_mut()) {
                 if let Some(v) = self.tabs.get(&t.id) {
                     t.focused = v.focused.clone().filter(|id| t.root.find(id).is_some());
                     t.zoomed = v.zoomed.clone().filter(|id| t.root.find(id).is_some());
@@ -320,6 +348,53 @@ mod tests {
         doc.replace(&mut m, Some("a"));
         assert_eq!(m.spaces.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s2", "s", "a/s", "z/s"]);
     }
+    #[test]
+    fn arrangements_and_floats_are_shared_but_showing_them_is_private() {
+        let mut m = model();
+        m.tab_mut("t").unwrap().arrangement = Some(Arrangement::Grid);
+        m.add_float("s", "f", Node::block("fp", Content::Terminal { terminal: "u1".into() }));
+        let doc = Document::capture(&m, None);
+        m.show_floats("s", false, false);
+        assert_eq!(doc, Document::capture(&m, None));
+        let view = View::capture(&m);
+        let mut other = Model::default();
+        doc.replace(&mut other, Some("mac"));
+        assert_eq!(other.tab("mac/t").unwrap().arrangement, Some(Arrangement::Grid));
+        let floats = other.space("mac/s").unwrap().floats.as_ref().unwrap();
+        assert_eq!((floats.id.as_str(), floats.arrangement), ("mac/f", Some(Arrangement::Stacked)));
+        assert_eq!(other.address_of("mac/fp").as_deref(), Some("mac/u1"));
+        assert!(!other.space("mac/s").unwrap().floats_shown);
+        assert_eq!(doc, Document::capture(&other, Some("mac")));
+        let mut again = Model::default();
+        doc.replace(&mut again, None);
+        again.show_floats("s", true, true);
+        let shown = View::capture(&again);
+        view.apply(&mut again);
+        assert!(!again.space("s").unwrap().floats_shown);
+        shown.apply(&mut again);
+        assert!(again.space("s").unwrap().floats_shown && again.space("s").unwrap().floats_focused);
+    }
+
+    #[test]
+    fn documents_without_floats_or_arrangements_read_as_before() {
+        let doc: Document = serde_json::from_value(serde_json::json!({"spaces":[{"id":"s","tabs":[{"id":"t"}]}]})).unwrap();
+        let mut m = Model::default();
+        doc.replace(&mut m, None);
+        assert!(m.space("s").unwrap().floats.is_none());
+        assert_eq!(m.tab("t").unwrap().arrangement, None);
+        let written = serde_json::to_value(Document::capture(&m, None)).unwrap();
+        assert!(written["spaces"][0].get("floats").is_none());
+        assert!(written["spaces"][0]["tabs"][0].get("arrangement").is_none());
+    }
+
+    #[test]
+    fn empty_floats_in_a_document_are_dropped() {
+        let doc: Document = serde_json::from_value(serde_json::json!({"spaces":[{"id":"s","tabs":[{"id":"t"}],"floats":{"id":"f"}}]})).unwrap();
+        let mut m = Model::default();
+        doc.replace(&mut m, None);
+        assert!(m.space("s").unwrap().floats.is_none());
+    }
+
     #[test]
     fn fresh_ids_are_not_a_per_screen_counter() {
         assert_ne!(Model::default().fresh_id("p"), Model::default().fresh_id("p"));

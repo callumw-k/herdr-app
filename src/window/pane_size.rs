@@ -156,7 +156,7 @@ impl AppWindow {
     }
 
     /// The block tabs show in, and the area it was last drawn with.
-    fn context_area(&self) -> Option<(&Node, Size<Pixels>)> {
+    pub(super) fn context_area(&self) -> Option<(&Node, Size<Pixels>)> {
         let context = self.chrome.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Context { .. })))?;
         let size = self.bounds.borrow().get(&context.id)?.size;
         (size.width > px(0.0) && size.height > px(0.0)).then_some((context, size))
@@ -180,7 +180,7 @@ impl AppWindow {
         }
         let scale = window.scale_factor();
         let active = self.model.active_tab().map(|t| t.id.clone());
-        for tab in self.model.tabs().filter(|t| Some(&t.id) != active.as_ref()) {
+        for tab in self.model.tabs().filter(|t| Some(&t.id) != active.as_ref() && !self.model.is_floats(&t.id)) {
             for pane in tab.shown().panes() {
                 if let Some(t) = self.terms.get(&pane.id)
                     && let Some((cols, rows)) = self.shown_size(tab, &pane.id, window)
