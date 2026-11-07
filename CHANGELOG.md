@@ -1,5 +1,12 @@
 # Herdr changelog
 
+## [0.2.0] - 2026-11-07
+
+### New
+- **Tabs can arrange their panes.** Pick even columns, even rows, a grid, or stacked (the focused pane full size, the rest as title bars), and the tab lays itself out again whenever a pane opens or closes. Alt+] and Alt+[ cycle arrangements, Alt+N adds a pane in the tab's arrangement, and the arrangement setting picks the one new tabs start with. Alt+] and Alt+[ no longer switch tabs: Ctrl+Tab and Ctrl+PageUp/PageDown still do.
+- **Floating terminals.** A space can keep terminals floating over all of its tabs. Alt+F opens, focuses or hides them, Alt+Shift+F opens another, and float_width and float_height set their size. On macOS the Alt keys are Option, which acts as Alt by default on US and ABC keyboard layouts.
+- If you've edited your keys.json, add "alt-]": "tab.arrange:next", "alt-[": "tab.arrange:prev", "alt-n": "pane.add", "alt-f": "float.toggle" and "alt-shift-f": "float.new" yourself.
+
 ## [0.1.13] - 2026-11-04
 <!-- spotlight macos -->
 

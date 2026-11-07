@@ -161,6 +161,32 @@ the highlighted line shows where it will land.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
+- A tab can have an **arrangement**: `vertical` (even columns), `horizontal`
+  (even rows), `grid`, or `stacked` (the focused pane full size, the others
+  folded to title bars you click to open). An arranged tab is rebuilt from its
+  pane order whenever a pane comes or goes (`pane.add`, closing one) or the
+  arrangement changes (`tab.arrange`, which cycles with `next`/`prev`), so a full
+  cycle brings back the layout it started from. Dragging a divider holds until
+  the next rebuild. `pane.split`, or dropping a pane on another's edge, makes the
+  tab hand-split again (arrangement null); swaps keep it. New tabs take
+  `settings.json` `arrangement`. `spaces()[i].tabs[j].arrangement` says which.
+  The arrangement is shared like the splits; stacked tabs are saved as rows, so
+  a Herdr without arrangements still shows every pane.
+- A space can have **floats**: terminals floating over every tab of the space,
+  in a box in the middle of the tab area (`settings.json`
+  `float_width`/`float_height`). They are
+  arranged like a tab (stacked when they open; `tab.arrange`, `pane.add`,
+  `pane.split`, `pane.zoom`, `pane.go` and `pane.swap` act on them while they
+  hold the keyboard), stay put when you switch tabs, and are kept by the core
+  like any pane. `float.new` opens one, `float.toggle` opens, focuses or hides
+  them, `float.show` shows or hides them. Clicking a float focuses it; clicking
+  the tab behind takes the keyboard back and leaves them shown. Closing a tab
+  never closes a float; closing the space does, and the last float closing
+  takes the floats away, never the space. Whether they're shown and hold the
+  keyboard stays on this screen. `spaces()[i].floats` is `{id, panes,
+  arrangement, status, shown, focused}` or null; `panes()` and `agents()` mark
+  floats `float: true` (their `tab` is the floats' id, an agent's `tab_index` 0).
+  Float terminals carry `herdr.tab=<floats id>`.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
   `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
   `agent.prev` follow its list.
@@ -555,9 +581,17 @@ The main ones:
   `tab.rename {id?, name}` ("": its number again), `tab.move {id, index}`,
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
-  skip settled tabs).
+  skip settled tabs), `tab.arrange {arrangement?, tab?}` (`vertical`,
+  `horizontal`, `grid`, `stacked`, `next` (default), `prev`, or `none`; default
+  tab: the focused one, or the floats while they hold the keyboard).
+- Floats: `float.new {argv?, folder?, space?}`, `float.toggle {space?}` (none:
+  opens one; not holding the keyboard: shows and focuses them; holding it: hides
+  them), `float.show {shown?, space?}` (no shown: flip; never takes the keyboard).
+  `tab.close {id}` with the floats' id ends them all.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+  terminal, or a mod pane; an arranged tab becomes hand-split),
+  `pane.add {pane?, argv?, folder? | mod?, props?}` (after the pane, in its tab's
+  arrangement, else split right), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
@@ -732,6 +766,10 @@ What's about the user, never a look:
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
   drags to move through it.
+- `arrangement`: how new tabs lay out their panes, `"vertical"`, `"horizontal"`,
+  `"grid"` (default), `"stacked"`, or `"none"` (split by hand). Existing tabs keep theirs.
+- `float_width`, `float_height`: the floats' box over the tab area, up to `1` a
+  share of it (default `0.9`), above `1` px at zoom 1.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:

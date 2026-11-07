@@ -3,6 +3,7 @@
 //! how they're split. Plus which pane has focus and agent attention (done vs
 //! seen) with Herdr's rollup. Pure data; the window drives it.
 
+use crate::arrangement::{Arrangement, arrange};
 use crate::layout::{Axis, Content, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,6 +23,9 @@ pub struct Tab {
     /// Put away (ms since the epoch): out of the lists, still running. Comes
     /// back when it's shown or one of its agents needs the person.
     pub settled: Option<u64>,
+    /// None: split by hand. Some: rebuilt evenly from the pane order whenever
+    /// a pane comes or goes.
+    pub arrangement: Option<Arrangement>,
 }
 
 /// A place to work, plus the folder its new terminals start in.
@@ -37,6 +41,12 @@ pub struct Space {
     pub tabs: Vec<Tab>,
     /// The selected tab.
     pub active: Option<String>,
+    /// Terminals floating over every tab of the space, arranged like a tab.
+    pub floats: Option<Tab>,
+    /// This screen shows the floats.
+    pub floats_shown: bool,
+    /// The floats hold the keyboard (only while shown).
+    pub floats_focused: bool,
 }
 
 /// A closed space, so opening it again doesn't ask for its name.
@@ -86,6 +96,13 @@ pub struct Model {
     seq: u64,
     /// Where each terminal works now: its repo (worktrees included) and branch.
     pub folder_info: HashMap<String, FolderInfo>,
+    /// How new tabs are arranged (None: split by hand).
+    pub default_arrangement: Option<Arrangement>,
+    /// The tab area's width over its height, for grids (0: not measured yet).
+    pub aspect: f32,
+    /// Terminals whose panes went with a space that closed on its own; the
+    /// window ends them.
+    pub doomed: Vec<String>,
 }
 
 /// Herdr's attention priority: blocked > done > working > idle > nothing.
@@ -115,6 +132,7 @@ impl Tab {
             root: Node::container(id, Axis::Row, vec![pane]),
             zoomed: None,
             settled: None,
+            arrangement: None,
         }
     }
 
@@ -148,6 +166,15 @@ impl Tab {
 impl Space {
     pub fn tab(&self, id: &str) -> Option<&Tab> {
         self.tabs.iter().find(|c| c.id == id)
+    }
+
+    pub fn shown_floats(&self) -> Option<&Tab> {
+        self.floats.as_ref().filter(|_| self.floats_shown)
+    }
+
+    /// The tab holding the keyboard: the floats while they have it, else the selected tab.
+    pub fn focused_tab(&self) -> Option<&Tab> {
+        self.shown_floats().filter(|_| self.floats_focused).or_else(|| self.active_tab())
     }
 
     /// The selected tab, else the first.
@@ -211,8 +238,17 @@ impl Model {
         self.spaces.iter_mut().find(|p| p.id == id)
     }
 
+    /// Every tab, floats included.
     pub fn tabs(&self) -> impl Iterator<Item = &Tab> {
-        self.spaces.iter().flat_map(|p| p.tabs.iter())
+        self.spaces.iter().flat_map(|p| p.tabs.iter().chain(p.floats.iter()))
+    }
+
+    fn tabs_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
+        self.spaces.iter_mut().flat_map(|p| p.tabs.iter_mut().chain(p.floats.iter_mut()))
+    }
+
+    pub fn is_floats(&self, tab: &str) -> bool {
+        self.spaces.iter().any(|p| p.floats.as_ref().is_some_and(|f| f.id == tab))
     }
 
     pub fn tab(&self, id: &str) -> Option<&Tab> {
@@ -220,12 +256,12 @@ impl Model {
     }
 
     pub fn tab_mut(&mut self, id: &str) -> Option<&mut Tab> {
-        self.spaces.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|c| c.id == id)
+        self.tabs_mut().find(|c| c.id == id)
     }
 
     /// The space holding a tab or a node inside one.
     pub fn space_of(&self, node: &str) -> Option<&Space> {
-        self.spaces.iter().find(|p| p.tabs.iter().any(|c| c.id == node || c.root.find(node).is_some()))
+        self.spaces.iter().find(|p| p.tabs.iter().chain(p.floats.iter()).any(|c| c.id == node || c.root.find(node).is_some()))
     }
 
     /// The tab holding a node (pane, container).
@@ -234,7 +270,7 @@ impl Model {
     }
 
     fn tab_of_mut(&mut self, node: &str) -> Option<&mut Tab> {
-        self.spaces.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|c| c.root.find(node).is_some())
+        self.tabs_mut().find(|c| c.root.find(node).is_some())
     }
 
     /// Adds a space at the end and selects it.
@@ -259,15 +295,27 @@ impl Model {
         (p.tabs.iter().position(|x| x.id == c.id).unwrap_or(0) + 1).to_string()
     }
 
-    pub fn add_space(&mut self, id: &str, name: &str, folder: &str, ctx: Tab) {
+    pub fn add_space(&mut self, id: &str, name: &str, folder: &str, mut ctx: Tab) {
+        ctx.arrangement = ctx.arrangement.or(self.default_arrangement);
         let active = Some(ctx.id.clone());
-        self.spaces.push(Space { id: id.to_owned(), name: name.to_owned(), folder: folder.to_owned(), machine: None, tabs: vec![ctx], active });
+        self.spaces.push(Space {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            folder: folder.to_owned(),
+            machine: None,
+            tabs: vec![ctx],
+            active,
+            floats: None,
+            floats_shown: false,
+            floats_focused: false,
+        });
         self.recent.retain(|r| r.name != name);
         self.active = Some(id.to_owned());
     }
 
     /// Adds a tab after the space's selected one and selects it (not the space).
-    pub fn add_tab(&mut self, space: &str, ctx: Tab) -> bool {
+    pub fn add_tab(&mut self, space: &str, mut ctx: Tab) -> bool {
+        ctx.arrangement = ctx.arrangement.or(self.default_arrangement);
         let Some(p) = self.space_mut(space) else { return false };
         let at = p.active.as_deref().and_then(|a| p.tabs.iter().position(|c| c.id == a)).map_or(p.tabs.len(), |i| i + 1);
         let id = ctx.id.clone();
@@ -290,9 +338,71 @@ impl Model {
         if !c.root.split(target, axis, block, container) {
             return false;
         }
+        c.arrangement = None;
         c.zoomed = None;
         c.focus(&new_pane);
         true
+    }
+
+    /// Adds a pane after `target` the way its tab is laid out: in its
+    /// arrangement, else split to the right. Focuses it.
+    pub fn add_pane(&mut self, target: &str, block: Node) -> bool {
+        let Some(tab) = self.tab_of(target) else { return false };
+        if tab.arrangement.is_none() {
+            return self.split_with(target, Axis::Row, block);
+        }
+        let mut panes: Vec<Node> = tab.root.panes().into_iter().cloned().collect();
+        let Some(at) = panes.iter().position(|p| p.id == target) else { return false };
+        let new_pane = block.id.clone();
+        panes.insert(at + 1, block);
+        let id = tab.id.clone();
+        self.rebuild(&id, panes);
+        let c = self.tab_mut(&id).unwrap();
+        c.zoomed = None;
+        c.focus(&new_pane);
+        true
+    }
+
+    /// Lays a tab out in an arrangement (None: keep the shape, split by hand from now on).
+    pub fn arrange(&mut self, tab: &str, arrangement: Option<Arrangement>) -> bool {
+        let Some(c) = self.tab_mut(tab) else { return false };
+        c.arrangement = arrangement;
+        self.reflow(tab);
+        true
+    }
+
+    /// Rebuilds an arranged tab from its panes in order; a hand-split one stays.
+    pub fn reflow(&mut self, tab: &str) {
+        let Some(panes) = self.tab(tab).map(|c| c.root.panes().into_iter().cloned().collect::<Vec<_>>()) else { return };
+        self.rebuild(tab, panes);
+    }
+
+    fn rebuild(&mut self, tab: &str, panes: Vec<Node>) {
+        let aspect = if self.aspect > 0.0 { self.aspect } else { 1.6 };
+        let Some(c) = self.tab_mut(tab) else { return };
+        let Some(kind) = c.arrangement else { return };
+        if panes.is_empty() {
+            return;
+        }
+        c.root = arrange(kind, &c.root.id, panes, aspect);
+    }
+
+    /// Adds a pane to a space's floats, making them when it has none, and
+    /// shows and focuses them. `layer`: the id new floats take.
+    pub fn add_float(&mut self, space: &str, layer: &str, block: Node) -> bool {
+        let Some(p) = self.space_mut(space) else { return false };
+        let target = p.floats.as_ref().and_then(|f| f.focused_pane());
+        p.floats_shown = true;
+        p.floats_focused = true;
+        let Some(target) = target else {
+            let mut floats = Tab::with_pane(layer, "", block);
+            floats.arrangement = Some(Arrangement::Stacked);
+            p.floats = Some(floats);
+            self.active = Some(space.to_owned());
+            return true;
+        };
+        self.active = Some(space.to_owned());
+        self.add_pane(&target, block)
     }
 
     /// Rearranges existing panes in one tab without changing their terminal addresses.
@@ -324,6 +434,9 @@ impl Model {
         }
         let tab = self.tab_of_mut(source).unwrap();
         tab.root = root;
+        if edge.is_some() {
+            tab.arrangement = None;
+        }
         tab.focus(source);
         true
     }
@@ -348,6 +461,7 @@ impl Model {
     }
 
     /// Removes a pane. Returns what else closed: the tab, and the space if it was its last.
+    /// The last float closing takes the floats away, never the space.
     pub fn remove_pane(&mut self, pane_id: &str) -> (bool, bool) {
         let Some(c) = self.tab_of_mut(pane_id) else { return (false, false) };
         c.root.remove(pane_id);
@@ -362,15 +476,28 @@ impl Model {
                 c.before.retain(|p| here.contains(p));
                 c.focused = c.before.pop().or_else(|| here.first().cloned());
             }
+            let id = c.id.clone();
+            self.reflow(&id);
             return (false, false);
         }
         let id = c.id.clone();
+        if self.is_floats(&id) {
+            self.remove_tab(&id);
+            return (false, false);
+        }
         let (_, space_closed) = self.remove_tab(&id);
         (true, space_closed)
     }
 
     /// Removes a tab. Returns its terminal addresses and whether its space closed.
+    /// A space's floats go alone; its last tab takes the space and its floats.
     pub fn remove_tab(&mut self, ctx: &str) -> (Vec<String>, bool) {
+        if let Some(p) = self.spaces.iter_mut().find(|p| p.floats.as_ref().is_some_and(|f| f.id == ctx)) {
+            let floats = p.floats.take().unwrap();
+            p.floats_shown = false;
+            p.floats_focused = false;
+            return (addresses(&floats.root), false);
+        }
         let Some(pi) = self.spaces.iter().position(|p| p.tab(ctx).is_some()) else { return (vec![], false) };
         let p = &mut self.spaces[pi];
         let ci = p.tabs.iter().position(|c| c.id == ctx).unwrap();
@@ -382,7 +509,8 @@ impl Model {
         let closed = p.tabs.is_empty();
         if closed {
             let id = p.id.clone();
-            self.remove_space(&id);
+            let floats = self.remove_space(&id);
+            self.doomed.extend(floats);
         }
         (addresses(&removed.root), closed)
     }
@@ -398,12 +526,21 @@ impl Model {
         if was_active {
             self.active = self.spaces.get(pi).or(self.spaces.last()).map(|p| p.id.clone());
         }
-        p.tabs.iter().flat_map(|c| addresses(&c.root)).collect()
+        p.tabs.iter().chain(p.floats.iter()).flat_map(|c| addresses(&c.root)).collect()
     }
 
-    /// The focused pane of the selected space's selected tab.
+    /// The focused pane of the selected space: its focused float while the
+    /// floats hold the keyboard, else its selected tab's.
     pub fn focused_pane(&self) -> Option<String> {
-        self.active_tab()?.focused_pane()
+        self.active_space()?.focused_tab()?.focused_pane()
+    }
+
+    /// Shows or hides a space's floats; hidden, they let go of the keyboard.
+    pub fn show_floats(&mut self, space: &str, shown: bool, focused: bool) -> bool {
+        let Some(p) = self.space_mut(space).filter(|p| p.floats.is_some()) else { return false };
+        p.floats_shown = shown;
+        p.floats_focused = shown && focused;
+        true
     }
 
     /// Selects a tab and its space. Shown again, a settled tab is back.
@@ -435,11 +572,21 @@ impl Model {
         self.tab_mut(ctx).is_some_and(|c| c.settled.take().is_some())
     }
 
-    /// Focuses a pane anywhere: selects its space and tab.
+    /// Focuses a pane anywhere: selects its space and tab. A float brings its
+    /// floats up with the keyboard; a tab's pane takes the keyboard from them.
     pub fn focus_pane(&mut self, pane_id: &str) -> bool {
         let Some(c) = self.tab_of_mut(pane_id) else { return false };
         c.focus(pane_id);
         let ctx = c.id.clone();
+        if let Some(p) = self.spaces.iter_mut().find(|p| p.floats.as_ref().is_some_and(|f| f.id == ctx)) {
+            p.floats_shown = true;
+            p.floats_focused = true;
+            self.active = Some(p.id.clone());
+            return true;
+        }
+        if let Some(p) = self.spaces.iter_mut().find(|p| p.tab(&ctx).is_some()) {
+            p.floats_focused = false;
+        }
         self.select_tab(&ctx)
     }
 
@@ -610,6 +757,7 @@ pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home
                 "active": Some(&c.id) == active.as_ref(),
                 "status": m.rollup(&addresses(&c.root)),
                 "panes": c.root.panes().len(),
+                "arrangement": c.arrangement.map(Arrangement::name),
                 "zoomed": c.zoomed.is_some(),
                 "settled": c.settled.is_some(),
                 "settled_at": c.settled,
@@ -618,7 +766,7 @@ pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home
             })
         })
         .collect();
-    let all: Vec<String> = p.tabs.iter().flat_map(|c| addresses(&c.root)).collect();
+    let all: Vec<String> = p.tabs.iter().chain(p.floats.iter()).flat_map(|c| addresses(&c.root)).collect();
     json!({
         "id": p.id,
         "index": index + 1,
@@ -630,6 +778,14 @@ pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home
         "active": m.active.as_deref() == Some(&p.id),
         "status": m.rollup(&all),
         "tabs": tabs,
+        "floats": p.floats.as_ref().map(|f| json!({
+            "id": f.id,
+            "panes": f.root.panes().len(),
+            "arrangement": f.arrangement.map(Arrangement::name),
+            "status": m.rollup(&addresses(&f.root)),
+            "shown": p.floats_shown,
+            "focused": p.floats_shown && p.floats_focused,
+        })),
     })
 }
 
@@ -945,6 +1101,166 @@ mod tests {
         m.tab_mut("c1").unwrap().zoomed = None;
         assert!(m.focus_pane("x2"));
         assert_eq!(m.tab("c1").unwrap().zoomed, None);
+    }
+
+    fn arranged(kind: Arrangement) -> Model {
+        let mut m = Model { default_arrangement: Some(kind), aspect: 1.6, ..Default::default() };
+        m.add_space("p1", "api", "/src/api", Tab::new("c1", "", "x1", "t1"));
+        m
+    }
+
+    fn weights(n: &Node) -> Vec<Option<crate::layout::Size>> {
+        n.panes().iter().map(|p| p.size).collect()
+    }
+
+    #[test]
+    fn new_tabs_take_the_default_arrangement() {
+        let m = arranged(Arrangement::Grid);
+        assert_eq!(m.tab("c1").unwrap().arrangement, Some(Arrangement::Grid));
+        let mut m = model_with_one();
+        m.add_tab("p1", Tab::new("c2", "", "x2", "t2"));
+        assert_eq!(m.tab("c2").unwrap().arrangement, None);
+    }
+
+    #[test]
+    fn adding_to_an_arranged_tab_goes_after_the_target_evenly_and_focuses_it() {
+        let mut m = arranged(Arrangement::Vertical);
+        m.add_pane("x1", pane("x2", "t2"));
+        m.add_pane("x2", pane("x3", "t3"));
+        m.add_pane("x1", pane("x4", "t4"));
+        assert_eq!(pane_order(&m, "c1"), ["x1", "x4", "x2", "x3"]);
+        assert_eq!(m.focused_pane().as_deref(), Some("x4"));
+        let root = &m.tab("c1").unwrap().root;
+        assert_eq!((root.id.as_str(), root.axis(), root.children().len()), ("c1", Some(Axis::Row), 4));
+    }
+
+    #[test]
+    fn adding_to_a_hand_split_tab_splits_right() {
+        let mut m = model_with_one();
+        m.split("x1", Axis::Column, "x2", "t2");
+        m.add_pane("x2", pane("x3", "t3"));
+        assert_eq!(m.tab("c1").unwrap().root.parent_of("x3").unwrap().axis(), Some(Axis::Row));
+        assert_eq!(m.tab("c1").unwrap().arrangement, None);
+    }
+
+    #[test]
+    fn closing_a_pane_evens_an_arranged_tab_out_again() {
+        let mut m = arranged(Arrangement::Horizontal);
+        m.add_pane("x1", pane("x2", "t2"));
+        m.add_pane("x2", pane("x3", "t3"));
+        m.tab_mut("c1").unwrap().root.find_mut("x1").unwrap().size = Some(crate::layout::Size::Weight { weight: 3.0 });
+        m.remove_pane("x2");
+        let root = &m.tab("c1").unwrap().root;
+        assert_eq!(weights(root), [None, None]);
+        assert_eq!(pane_order(&m, "c1"), ["x1", "x3"]);
+    }
+
+    #[test]
+    fn splitting_or_dropping_on_an_edge_makes_a_tab_hand_split_but_swaps_keep_its_arrangement() {
+        let mut m = arranged(Arrangement::Grid);
+        m.add_pane("x1", pane("x2", "t2"));
+        m.add_pane("x2", pane("x3", "t3"));
+        assert!(m.swap_panes("x1", "x3").is_ok());
+        assert_eq!(m.tab("c1").unwrap().arrangement, Some(Arrangement::Grid));
+        assert!(m.move_pane("x1", "x2", Some(crate::layout::Edge::Bottom)));
+        assert_eq!(m.tab("c1").unwrap().arrangement, None);
+        let mut m = arranged(Arrangement::Grid);
+        m.split("x1", Axis::Column, "x2", "t2");
+        assert_eq!(m.tab("c1").unwrap().arrangement, None);
+    }
+
+    #[test]
+    fn a_full_cycle_of_arrangements_brings_the_tab_back() {
+        let mut m = arranged(Arrangement::Vertical);
+        for (id, addr) in [("x2", "t2"), ("x3", "t3"), ("x4", "t4"), ("x5", "t5")] {
+            let last = m.tab("c1").unwrap().root.panes().last().unwrap().id.clone();
+            m.add_pane(&last, pane(id, addr));
+        }
+        let start = m.tab("c1").unwrap().root.clone();
+        let mut kind = Arrangement::Vertical;
+        for _ in 0..4 {
+            kind = kind.next();
+            assert!(m.arrange("c1", Some(kind)));
+            assert_eq!(pane_order(&m, "c1"), ["x1", "x2", "x3", "x4", "x5"]);
+        }
+        assert_eq!(m.tab("c1").unwrap().root, start);
+        assert!(m.arrange("c1", None));
+        assert_eq!(m.tab("c1").unwrap().root, start);
+    }
+
+    #[test]
+    fn floats_open_over_the_space_shown_and_focused_and_stacked() {
+        let mut m = model_with_one();
+        assert!(m.add_float("p1", "f1", pane("y1", "u1")));
+        let p = m.space("p1").unwrap();
+        assert!(p.floats_shown && p.floats_focused);
+        assert_eq!(p.floats.as_ref().unwrap().arrangement, Some(Arrangement::Stacked));
+        assert_eq!(p.tabs.len(), 1);
+        assert_eq!(m.focused_pane().as_deref(), Some("y1"));
+        assert!(m.add_float("p1", "unused", pane("y2", "u2")));
+        assert_eq!(pane_order(&m, "f1"), ["y1", "y2"]);
+        assert_eq!(m.focused_pane().as_deref(), Some("y2"));
+        assert_eq!((m.pane_of("u2").as_deref(), m.tab_of("y2").map(|t| t.id.as_str())), (Some("y2"), Some("f1")));
+        assert!(m.is_floats("f1") && !m.is_floats("c1"));
+        assert_eq!(m.all_addresses(), ["t1", "u1", "u2"]);
+    }
+
+    #[test]
+    fn focus_moves_between_a_tab_and_its_floats_and_hiding_lets_go() {
+        let mut m = model_with_one();
+        m.add_float("p1", "f1", pane("y1", "u1"));
+        assert!(m.focus_pane("x1"));
+        let p = m.space("p1").unwrap();
+        assert!(p.floats_shown && !p.floats_focused);
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+        assert!(m.focus_pane("y1"));
+        assert_eq!(m.focused_pane().as_deref(), Some("y1"));
+        assert!(m.show_floats("p1", false, true));
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+        assert!(!m.space("p1").unwrap().floats_focused);
+        assert!(!m.show_floats("missing", true, true));
+    }
+
+    #[test]
+    fn floats_stay_over_every_tab_of_their_space() {
+        let mut m = model_with_one();
+        m.add_float("p1", "f1", pane("y1", "u1"));
+        m.add_tab("p1", Tab::new("c2", "", "x2", "t2"));
+        assert!(m.space("p1").unwrap().floats_shown);
+        assert_eq!(m.focused_pane().as_deref(), Some("y1"));
+        m.remove_tab("c2");
+        assert!(m.space("p1").unwrap().floats.is_some());
+    }
+
+    #[test]
+    fn the_last_float_closing_takes_the_floats_but_never_the_space() {
+        let mut m = model_with_one();
+        m.add_float("p1", "f1", pane("y1", "u1"));
+        assert_eq!(m.remove_pane("y1"), (false, false));
+        let p = m.space("p1").unwrap();
+        assert!(p.floats.is_none() && !p.floats_shown && !p.floats_focused);
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+    }
+
+    #[test]
+    fn a_space_closing_with_its_last_tab_ends_its_floats_too() {
+        let mut m = model_with_one();
+        m.add_float("p1", "f1", pane("y1", "u1"));
+        assert_eq!(m.remove_pane("x1"), (true, true));
+        assert_eq!(m.doomed, ["u1"]);
+        let mut m = model_with_one();
+        m.add_float("p1", "f1", pane("y1", "u1"));
+        assert_eq!(m.remove_space("p1"), ["t1", "u1"]);
+    }
+
+    #[test]
+    fn removing_the_floats_as_a_tab_ends_only_them() {
+        let mut m = model_with_one();
+        m.add_float("p1", "f1", pane("y1", "u1"));
+        m.add_float("p1", "f1", pane("y2", "u2"));
+        assert_eq!(m.remove_tab("f1"), (vec!["u1".to_owned(), "u2".to_owned()], false));
+        assert!(m.space("p1").unwrap().floats.is_none());
+        assert!(m.tab("c1").is_some());
     }
 
     #[test]

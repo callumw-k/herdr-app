@@ -82,6 +82,9 @@ export function run(name: string, args?: Record<string, unknown>): null;
 
 export type Status = "working" | "blocked" | "done" | "idle";
 
+/** How a tab lays out its panes (tab.arrange); null: split by hand. */
+export type Arrangement = "vertical" | "horizontal" | "grid" | "stacked";
+
 /** A named piece of work in a space: shared through that machine's core doc.
  * Remote space/tab/pane ids have a machine/ prefix; labels on that machine omit it.
  * Selection, focus, zoom and settled state belong to this screen only. */
@@ -98,6 +101,8 @@ export interface TabInfo {
   /** Most urgent agent status in it, or null. */
   status: Status | null;
   panes: number;
+  /** Rebuilt evenly from its pane order whenever a pane comes or goes; null: split by hand. */
+  arrangement: Arrangement | null;
   zoomed: boolean;
   /** Put away on this screen (tab.settle): lists hide it or fold it; it keeps running and comes back
    *  when shown or when an agent in it needs the person. */
@@ -129,6 +134,8 @@ export interface SpaceInfo {
   /** Most urgent agent status in it (blocked > done > working > idle), or null. */
   status: Status | null;
   tabs: TabInfo[];
+  /** Terminals floating over every tab of the space (float.new), or null. Shown and focused are this screen's. */
+  floats: { id: string; panes: number; arrangement: Arrangement | null; status: Status | null; shown: boolean; focused: boolean } | null;
 }
 
 /** Machines' layout documents on this connection. Null names this computer.
@@ -161,9 +168,14 @@ export interface AgentInfo {
   pane: string;
   space: string;
   space_name: string;
+  /** The floats' id for a float. */
   tab: string;
+  /** 0 for a float. */
   tab_index: number;
+  /** "floats" for a float. */
   tab_name: string;
+  /** Floating over its space's tabs. */
+  float: boolean;
   /** "done" means it finished while you weren't looking; it becomes "idle" once you look
    *  (here or on another Herdr client). */
   status: Status;
@@ -188,7 +200,10 @@ export interface PaneInfo {
    *  pane, mod, tab, title, focused and zoomed are set. */
   terminal: string | null;
   mod?: string;
+  /** The floats' id for a float. */
   tab: string;
+  /** Floating over its space's tabs. */
+  float: boolean;
   /** The terminal's title (what the program set), or the mod's name. */
   title: string;
   /** Its live folder, and the git branch there. */
@@ -270,7 +285,7 @@ export function placement(): {
 /** Every theme color by name: background (the terminals'), surface, canvas (behind cards),
  *  chrome (sidebars and bars), popover, raised, hover, selected, border, input, foreground,
  *  muted, dim, accent, accent_foreground, solid and solid_foreground (a primary button: ink on
- *  paper, paper on ink), selection, working, blocked, done, idle, unknown, ansi0..ansi15.
+ *  paper, paper on ink), selection, working, blocked, done, idle, unknown, float (the floats' frame), ansi0..ansi15.
  *  Light and dark themes name the same colors, so a mod that uses them follows both. */
 export function theme(): Record<string, string>;
 

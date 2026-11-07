@@ -118,6 +118,54 @@ Close a pane and end its terminal.
 |---|---|
 | `pane` | no |
 
+## `pane.add`
+
+Add a terminal (or a mod: `mod`, its `props`) after a pane (default: the focused one) the way its tab is laid out: in the tab's arrangement, else split to the right. In the floats, it's another float.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `argv` | no |
+| `folder` | no |
+| `mod` | no |
+| `props` | no |
+
+## `tab.arrange`
+
+Lay a tab's panes out (default: the focused tab, or the floats while they hold the keyboard): "vertical" (even columns), "horizontal" (even rows), "grid", "stacked" (the focused pane full size, the rest as title bars), "next" (default) or "prev" to cycle, or "none" to keep the shape and split by hand. An arranged tab is rebuilt from its pane order whenever a pane comes or goes; pane.split makes it hand-split again.
+
+| Argument | Required |
+|---|---|
+| `arrangement` | no |
+| `tab` | no |
+
+## `float.new`
+
+Open a terminal floating over every tab of a space (default: the shown one), in folder (default: the focused terminal's), optionally an agent (argv). The space's floats show and take the keyboard.
+
+| Argument | Required |
+|---|---|
+| `argv` | no |
+| `folder` | no |
+| `space` | no |
+
+## `float.toggle`
+
+The floats key: opens a float when the space has none, shows and focuses its floats when they don't hold the keyboard, and hides them when they do. Never closes a float.
+
+| Argument | Required |
+|---|---|
+| `space` | no |
+
+## `float.show`
+
+Show (shown true) or hide (false) a space's floats without moving the keyboard to them; no shown: flip.
+
+| Argument | Required |
+|---|---|
+| `shown` | no |
+| `space` | no |
+
 ## `terminal.open`
 
 Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane.
