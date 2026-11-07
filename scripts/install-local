@@ -1,0 +1,28 @@
+#!/bin/bash
+# Builds a release binary and copies it over the herdr-app this machine runs,
+# keeping the existing install (symlinks, launcher entry) as it is.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+installed=$(command -v herdr-app) || { echo 'No herdr-app on PATH to replace.' >&2; exit 1; }
+target=$(readlink -f "$installed")
+built=$PWD/target/release/herdr-app
+
+cargo build --release --locked
+
+if [[ $target == "$built" ]]; then
+  echo "herdr-app already points at $built."
+  exit 0
+fi
+
+# The running app holds the old file open, so swap via rename instead of writing into it.
+tmp=$(mktemp "$target.XXXXXX")
+cp "$built" "$tmp"
+chmod 755 "$tmp"
+mv -f "$tmp" "$target"
+echo "Installed $built -> $target. Quit and reopen Herdr to use the new build."
+
+if [[ -e "$(dirname "$target").new" ]]; then
+  echo "warning: $(dirname "$target").new holds a downloaded update that will replace this build on the next quit." >&2
+fi
