@@ -45,6 +45,27 @@ function title(tab, l) {
   const telling = live && live !== prog && !/^[~/]|^[A-Za-z]:\\/.test(live) && !live.includes("@") && live.toLowerCase() !== l?.program?.key;
   return (tab.name === prog || !tab.named) && telling ? live : tab.name;
 }
+// Agents of child tabs (tab.new from inside a pane), by the agent each nests
+// under: the first agent of its nearest ancestor tab that has one. Pinned
+// agents keep their own row.
+function childTabAgents(list, tabs) {
+  const first = new Map();
+  for (const a of list) if (!first.has(a.tab)) first.set(a.tab, a);
+  const kids = new Map();
+  for (const a of list) {
+    if (a.pinned) continue;
+    let up = tabs.get(a.tab)?.parent, host = null;
+    for (let n = 0; up && !host && n < 32; n++) {
+      host = first.get(up) ?? null;
+      up = tabs.get(up)?.parent;
+    }
+    if (!host || host === a) continue;
+    if (!kids.has(host.address)) kids.set(host.address, []);
+    kids.get(host.address).push(a);
+  }
+  return kids;
+}
+
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // A sub-agent without a pane isn't in agents(): its raw word, error counting as
 // blocked. It's never done: it reports to its parent, and the parent's done is the news.
@@ -237,22 +258,32 @@ export default class Agents extends View {
     // it, it gets no row of its own, unless it's pinned.
     const nested = new Set(collapsed ? [] : list.flatMap((a) => this.tree(all, a.address).map((s) => s.t.address)));
     list = list.filter((a) => a.pinned || !nested.has(a.address));
+    const everyone = list;
+    const tabs = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, tab]));
+    const family = collapsed ? new Map() : childTabAgents(list, tabs);
+    const under = new Set([...family.values()].flat().map((a) => a.address));
+    list = list.filter((a) => !under.has(a.address));
     const tabCounts = new Map();
-    for (const a of list) tabCounts.set(a.tab, (tabCounts.get(a.tab) ?? 0) + 1);
+    for (const a of everyone) tabCounts.set(a.tab, (tabCounts.get(a.tab) ?? 0) + 1);
     const byPriority = sort.id === "priority";
-    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
-    const rankOf = (a) => urgency.get(a.address);
+    const urgency = new Map();
+    const rankOf = (a) => {
+      if (!urgency.has(a.address)) urgency.set(a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0), ...(family.get(a.address) ?? []).map(rankOf)));
+      return urgency.get(a.address);
+    };
     if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     const pinned = list.filter((a) => a.pinned);
     const rest = list.filter((a) => !a.pinned);
     list = [...pinned, ...rest];
-    setAgentOrder(list.map((a) => a.address));
+    const withFamily = (a) => [a, ...(family.get(a.address) ?? []).flatMap(withFamily)];
+    setAgentOrder(list.flatMap(withFamily).map((a) => a.address));
 
-    const withKids = (a, i) => {
+    const withKids = (a, i, depth = 0) => {
       const subs = collapsed ? [] : this.tree(all, a.address);
-      const r = row(a, i, subs);
-      if (this.folded.has(a.address)) return [r];
-      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority))];
+      const r = row(a, i, subs, depth);
+      const kids = (family.get(a.address) ?? []).flatMap((k) => withKids(k, i, depth + 1));
+      if (this.folded.has(a.address)) return [r, ...kids];
+      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority)), ...kids];
     };
 
     // The fold chevron; folded, the count too, colored by the most urgent one.
@@ -286,21 +317,20 @@ export default class Agents extends View {
     // otherwise read the same.
     // Read the pane snapshot once: every host read copies the whole list into JS.
     const leads = leadPanes(panes());
-    const tabs = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, tab]));
-    const labels = new Map(list.map(a => {
+    const labels = new Map(everyone.map(a => {
       const tab = tabs.get(a.tab);
       const many = tabCounts.get(a.tab) > 1;
       return [a.address, tab ? title(many ? { ...tab, named: false } : tab, many ? a : leads.get(a.tab)) : (a.title || a.program?.name || "")];
     }));
     const label = (a) => labels.get(a.address);
-    const detail = new Map(list.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
+    const detail = new Map(everyone.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
     const seen = {};
-    for (const a of list) { const k = `${a.space_name}\u0000${detail.get(a.address) ?? ""}`; seen[k] = (seen[k] ?? 0) + 1; }
-    for (const a of list) {
+    for (const a of everyone) { const k = `${a.space_name}\u0000${detail.get(a.address) ?? ""}`; seen[k] = (seen[k] ?? 0) + 1; }
+    for (const a of everyone) {
       if (detail.get(a.address) == null && seen[`${a.space_name}\u0000`] > 1) detail.set(a.address, label(a));
     }
 
-    const row = (a, i, subs = []) => {
+    const row = (a, i, subs = [], depth = 0) => {
       const pic = icon(a.program, 16, t.foreground);
       const more = detail.get(a.address);
       // An agent on another machine (`vps/t7`) says which.
@@ -340,11 +370,12 @@ export default class Agents extends View {
         .child(svg(`mods/workspace-chrome/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
       // Under a space header the space goes without saying; an automatic tab number says nothing.
       // Without a space header above (priority, pinned) the row names its space.
-      const full = byPriority || isPinned;
+      const full = (byPriority || isPinned) && depth === 0;
       const name = full ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
       return h_flex()
         .id(`ag-${a.address}`)
         .px(8)
+        .when(depth > 0, (el) => el.pl(8 + 18 * depth))
         .h(30)
         .flex_none()
         .rounded(8)
@@ -413,8 +444,8 @@ export default class Agents extends View {
           .child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim)));
     };
     const rows = collapsed
-      ? list.flatMap(withKids)
-      : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))]);
+      ? list.flatMap((a, i) => withKids(a, i))
+      : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap((a, i) => withKids(a, i)))]);
 
     return v_flex()
       .size_full()

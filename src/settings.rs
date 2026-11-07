@@ -409,6 +409,20 @@ pub struct Person {
     /// The floats' size over the tab area: up to 1 a share of it, above 1 px.
     pub float_width: f32,
     pub float_height: f32,
+    /// Repos that each own a space, made the first time a shell goes into one (follow.rs).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<Repo>,
+}
+
+/// A repo that owns a space; with `children`, a projects folder whose every
+/// folder does. `machine`: whose folder it is (None: this computer).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Repo {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub children: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -468,6 +482,7 @@ impl Default for Person {
             arrangement: "grid".into(),
             float_width: 0.9,
             float_height: 0.9,
+            repos: Vec::new(),
         }
     }
 }
@@ -506,6 +521,7 @@ pub struct Settings {
     pub arrangement: String,
     pub float_width: f32,
     pub float_height: f32,
+    pub repos: Vec<Repo>,
 }
 
 /// Attention sounds: when an agent needs you, and when one finished while you
@@ -551,6 +567,7 @@ impl Default for Settings {
             arrangement: "grid".into(),
             float_width: 0.9,
             float_height: 0.9,
+            repos: Vec::new(),
         }
     }
 }
@@ -592,6 +609,7 @@ impl Settings {
             arrangement: person.arrangement.clone(),
             float_width: person.float_width,
             float_height: person.float_height,
+            repos: person.repos.clone(),
         }
     }
 
@@ -653,6 +671,16 @@ impl Settings {
         for (k, v) in [("float_width", self.float_width), ("float_height", self.float_height)] {
             if v.is_nan() || v <= 0.0 {
                 out.push(format!("{k} {v} must be above 0: up to 1 a share of the tab area, above 1 px"));
+            }
+        }
+        for r in &self.repos {
+            let path = r.path.trim();
+            if path.is_empty() {
+                out.push("repos: an entry has no path".into());
+            } else if let Some(m) = r.machine.as_deref().filter(|m| !m.is_empty() && path.starts_with('~')) {
+                out.push(format!("repos: {path:?} on {m} must be a full path: ~ is this computer's home"));
+            } else if !path.starts_with('~') && !crate::follow::absolute(path) {
+                out.push(format!("repos: {path:?} must be a full path (or start with ~)"));
             }
         }
         out
@@ -938,6 +966,21 @@ mod tests {
     }
 
     #[test]
+    fn repos_default_to_this_computer_and_a_remote_tilde_is_a_problem() {
+        let person: Person = serde_json::from_value(serde_json::json!({"repos": [
+            {"path": "~/code/herdr"}, {"path": "~/projects", "children": true}, {"path": "/srv/api", "machine": "vps"},
+        ]})).unwrap();
+        assert_eq!(person.repos[0], Repo { path: "~/code/herdr".into(), children: false, machine: None });
+        assert!(person.repos[1].children);
+        let written = serde_json::to_value(&person).unwrap();
+        assert_eq!(written["repos"][0], serde_json::json!({"path": "~/code/herdr"}));
+        assert!(serde_json::to_value(Person::default()).unwrap().get("repos").is_none());
+        assert!(Settings::compose(&person, &crate::layout::Look::default(), true).problems().is_empty());
+        let remote: Person = serde_json::from_value(serde_json::json!({"repos": [{"path": "~/api", "machine": "vps"}, {"path": " "}, {"path": "code/api"}]})).unwrap();
+        assert_eq!(Settings::compose(&remote, &crate::layout::Look::default(), true).problems().len(), 3);
+    }
+
+    #[test]
     fn program_clipboard_writes_default_on_and_can_be_disabled() {
         let default: Person = serde_json::from_str("{}").unwrap();
         assert!(default.clipboard_write);
@@ -971,7 +1014,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), repos: vec![Repo::default()], ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

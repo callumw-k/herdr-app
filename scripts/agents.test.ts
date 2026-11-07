@@ -212,3 +212,50 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keep
   expect(pinned.texts.get("ag-t3")).toContain("t3");
   expect(keptRender(sort, { kept: [{ address: "t3", parent: "t9" }] }).ids).toContain("ag-t3"); // its parent ended
 });
+
+// Agents in tabs made from inside a pane (tab.new from an agent's terminal).
+function familyRender(sort: string, { width = 268, pinned = [] as string[], status = {} as Record<string, string> } = {}) {
+  const program = { name: "Claude", key: "claude", agent: true };
+  const tabOf = { t1: "parent", t2: "child", t4: "grandchild", t3: "other" } as Record<string, string>;
+  const list = ["t1", "t2", "t4", "t3"].map((address, i) => ({
+    address, pane: `p-${address}`, tab: tabOf[address], space: "s1", space_name: "Project", program,
+    title: `${address} work`, status: status[address] ?? "idle", seq: i, pinned: pinned.includes(address),
+  }));
+  const orders: string[][] = [];
+  const { agents } = harness([], {
+    agents: () => list, terminals: () => list.map(a => ({ address: a.address, parent: null, state: "live", program, labels: {} })),
+    panes: () => list.map(a => ({ tab: a.tab, terminal: a.address, program, title: a.title })), focused: () => null,
+    spaces: () => [{ tabs: [
+      { id: "parent", name: "1", named: false, parent: null }, { id: "child", name: "2", named: false, parent: "parent" },
+      { id: "grandchild", name: "3", named: false, parent: "child" }, { id: "other", name: "4", named: false, parent: null },
+    ] }],
+    layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => sort,
+    theme: () => ({}), setAgentOrder: (order: string[]) => orders.push(order),
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  const ids: string[] = [];
+  const walk = (node: any) => { if (node?.id?.startsWith("ag-t")) ids.push(node.id); (node?.children ?? []).forEach(walk); };
+  walk(agents.render({}).node);
+  return { ids, order: orders[orders.length - 1] };
+}
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: a child tab's agent follows its parent tab's agent, a grandchild's follows that`, () => {
+  const { ids, order } = familyRender(sort);
+  expect(ids.indexOf("ag-t2")).toBe(ids.indexOf("ag-t1") + 1);
+  expect(ids.indexOf("ag-t4")).toBe(ids.indexOf("ag-t2") + 1);
+  expect(order.slice(order.indexOf("t1"), order.indexOf("t1") + 3)).toEqual(["t1", "t2", "t4"]);
+  expect(new Set(ids).size).toBe(ids.length);
+});
+
+test("priority: a child tab's urgent agent lifts its parent's agent and stays under it", () => {
+  const { order } = familyRender("priority", { status: { t4: "blocked", t3: "working" } });
+  expect(order).toEqual(["t1", "t2", "t4", "t3"]);
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: a pinned child tab agent keeps its own row, and the rail doesn't nest`, () => {
+  const pinned = familyRender(sort, { pinned: ["t2"] });
+  expect(pinned.order[0]).toBe("t2");
+  expect(pinned.ids.filter(id => id === "ag-t2")).toHaveLength(1);
+  expect(pinned.order.slice(0, 2)).toEqual(["t2", "t4"]);
+  expect(familyRender(sort, { width: 44 }).order).toHaveLength(4);
+});

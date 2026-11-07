@@ -57,9 +57,26 @@ Move a space to a position (1 = first).
 | `id` | yes |
 | `index` | yes |
 
+## `space.pin`
+
+Pin a space (default: the shown one) to a folder on its machine: a shell whose folder changes at its prompt (a `cd`) into it or below moves to a new tab here (`cd x && make`: once make ends); the deepest pin wins. No path: pin where its focused terminal is, or unpin when it's already pinned there; a path must be full (`~`: this computer's home); empty path: unpin. An unnamed pinned space is called after its folder.
+
+| Argument | Required |
+|---|---|
+| `id` | no |
+| `path` | no |
+
+## `space.declare`
+
+Declare a space's folder (its pin, else where its focused terminal is) as a repo in settings.json `repos`, for its machine, or undeclare it when it already is. Declaring pins the space there too. A declared repo gets its own space the first time the focused shell changes into it.
+
+| Argument | Required |
+|---|---|
+| `id` | no |
+
 ## `tab.new`
 
-Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new).
+Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new). `parent`: the tab it nests under (its space unless `space`; "": top-level). Without it, `herdr-app do tab.new` run in a terminal nests the new tab under that terminal's tab. A child reads `parent › child` and opens after its parent's other children; closing a parent hands its children to the grandparent.
 
 | Argument | Required |
 |---|---|
@@ -70,6 +87,7 @@ Make a tab in a space (default: the selected one; name default: none, so it's ca
 | `task` | no |
 | `mod` | no |
 | `props` | no |
+| `parent` | no |
 
 ## `tab.close`
 

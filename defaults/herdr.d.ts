@@ -103,6 +103,9 @@ export interface TabInfo {
   panes: number;
   /** Rebuilt evenly from its pane order whenever a pane comes or goes; null: split by hand. */
   arrangement: Arrangement | null;
+  /** The tab it nests under (tab.new from inside a pane, or {parent}), in the same space; null: top-level.
+   *  Shown as `parent › child`. */
+  parent: string | null;
   zoomed: boolean;
   /** Put away on this screen (tab.settle): lists hide it or fold it; it keeps running and comes back
    *  when shown or when an agent in it needs the person. */
@@ -125,6 +128,8 @@ export interface SpaceInfo {
   named: boolean;
   /** Where its new terminals start (on its machine; empty: that machine's home). */
   folder: string;
+  /** The folder it's pinned to (space.pin), on its machine: shells that change into it move here. Null: not pinned. */
+  path: string | null;
   /** The machine it lives on (`hc machine ls`), null for this one. */
   machine: string | null;
   /** The git branch of the terminal it shows first, if any. */

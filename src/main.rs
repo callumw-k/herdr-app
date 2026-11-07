@@ -7,6 +7,7 @@ mod commands;
 mod control;
 mod core_bin;
 mod files;
+mod follow;
 mod hc;
 mod keys;
 mod layout;

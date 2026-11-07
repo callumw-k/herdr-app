@@ -19,6 +19,8 @@ pub struct SharedSpace {
     id: String,
     name: String,
     folder: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
     tabs: Vec<SharedTab>,
     #[serde(skip_serializing_if = "Option::is_none")]
     floats: Option<SharedTab>,
@@ -34,6 +36,8 @@ struct SharedTab {
     root: Node,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     arrangement: Option<Arrangement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
 }
 
 fn empty_root() -> Node {
@@ -103,13 +107,14 @@ impl SharedTab {
     fn capture(t: &Tab, map: &impl Fn(&str) -> String) -> Self {
         let mut root = t.root.clone();
         map_node(&mut root, map);
-        SharedTab { id: map(&t.id), name: t.name.clone(), root, arrangement: t.arrangement }
+        SharedTab { id: map(&t.id), name: t.name.clone(), root, arrangement: t.arrangement, parent: t.parent.as_deref().map(map) }
     }
 
     fn tab(&self, map: &impl Fn(&str) -> String) -> Tab {
         let mut root = self.root.clone();
         map_node(&mut root, map);
-        Tab { id: map(&self.id), name: self.name.clone(), root, focused: None, before: vec![], zoomed: None, settled: None, arrangement: self.arrangement }
+        let parent = self.parent.as_deref().filter(|p| !p.is_empty()).map(map);
+        Tab { id: map(&self.id), name: self.name.clone(), root, focused: None, before: vec![], zoomed: None, settled: None, arrangement: self.arrangement, parent }
     }
 }
 
@@ -125,6 +130,7 @@ impl Document {
                     id: map(&s.id),
                     name: s.name.clone(),
                     folder: s.folder.clone(),
+                    path: s.path.clone(),
                     tabs: s.tabs.iter().map(|t| SharedTab::capture(t, &map)).collect(),
                     floats: s.floats.as_ref().map(|t| SharedTab::capture(t, &map)),
                 })
@@ -142,13 +148,17 @@ impl Document {
             name: s.name.clone(),
             folder: s.folder.clone(),
             machine: machine.map(str::to_owned),
+            path: s.path.clone().filter(|p| !p.is_empty()),
             active: None,
             tabs: s.tabs.iter().map(|t| t.tab(&map)).collect(),
-            floats: s.floats.as_ref().map(|t| t.tab(&map)).filter(|t| !t.root.panes().is_empty()),
+            floats: s.floats.as_ref().map(|t| Tab { parent: None, ..t.tab(&map) }).filter(|t| !t.root.panes().is_empty()),
             floats_shown: false,
             floats_focused: false,
         });
         model.spaces.splice(at..at, spaces);
+        for s in model.spaces.iter_mut().filter(|s| s.machine.as_deref() == machine) {
+            s.tidy_parents();
+        }
         model.order_spaces();
         view.apply(model);
     }
@@ -385,6 +395,43 @@ mod tests {
         let written = serde_json::to_value(Document::capture(&m, None)).unwrap();
         assert!(written["spaces"][0].get("floats").is_none());
         assert!(written["spaces"][0]["tabs"][0].get("arrangement").is_none());
+    }
+
+    #[test]
+    fn a_pin_is_shared_with_its_machine_and_left_out_when_absent() {
+        let mut m = model();
+        m.space_mut("s").unwrap().path = Some("/work/api".into());
+        let doc = Document::capture(&m, None);
+        let mut other = Model::default();
+        doc.replace(&mut other, Some("mac"));
+        assert_eq!(other.space("mac/s").unwrap().path.as_deref(), Some("/work/api"));
+        assert_eq!(doc, Document::capture(&other, Some("mac")));
+        let old: Document = serde_json::from_value(serde_json::json!({"spaces":[{"id":"s","tabs":[{"id":"t"}],"path":""}]})).unwrap();
+        let mut m = Model::default();
+        old.replace(&mut m, None);
+        assert_eq!(m.space("s").unwrap().path, None);
+        assert!(serde_json::to_value(Document::capture(&m, None)).unwrap()["spaces"][0].get("path").is_none());
+    }
+
+    #[test]
+    fn a_tabs_parent_is_shared_and_old_or_broken_ones_read_as_top_level() {
+        let mut m = model();
+        m.add_tab("s", Tab::new("c", "", "p2", "t2"));
+        m.nest("c", "t");
+        let doc = Document::capture(&m, None);
+        let mut other = Model::default();
+        doc.replace(&mut other, Some("mac"));
+        assert_eq!(other.tab("mac/c").unwrap().parent.as_deref(), Some("mac/t"));
+        assert_eq!(doc, Document::capture(&other, Some("mac")));
+        let written = serde_json::to_value(&doc).unwrap();
+        assert_eq!(written["spaces"][0]["tabs"][1]["parent"], "t");
+        assert!(written["spaces"][0]["tabs"][0].get("parent").is_none());
+        let broken: Document = serde_json::from_value(serde_json::json!({"spaces":[{"id":"s","tabs":[
+            {"id":"a","parent":"gone"}, {"id":"b","parent":"b"}, {"id":"c","parent":""}, {"id":"d"},
+        ]}]})).unwrap();
+        let mut m = Model::default();
+        broken.replace(&mut m, None);
+        assert!(m.space("s").unwrap().tabs.iter().all(|t| t.parent.is_none()));
     }
 
     #[test]

@@ -270,6 +270,9 @@ struct Term {
 enum TerminalChange {
     Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, axis: Axis },
     Park,
+    /// A shell that followed its folder to another space (follow.rs): a new tab
+    /// there, or a new space pinned to `path` when `space` doesn't exist.
+    Move { space: String, tab: String, folder: String, path: Option<String>, focus: bool },
 }
 
 struct PendingTerminalChange {
@@ -398,6 +401,10 @@ pub struct AppWindow {
     person: settings::Person,
     /// What the last command made or why it didn't (for callers that wait for it).
     reply: Option<Value>,
+    /// The terminal a `herdr-app do` ran in (`$HC_TERMINAL_ID`), while its command runs.
+    caller: Option<String>,
+    /// The window's title as last set: where the shown tab is.
+    title: String,
     /// The `where` label last written per terminal address.
     written_where: HashMap<String, String>,
     /// `herdr.seen` turns written but not yet back from the core.
@@ -412,6 +419,9 @@ pub struct AppWindow {
     cwds: HashMap<String, String>,
     /// When each terminal's repo and branch were last read, and what it was doing.
     folders_checked: HashMap<String, FolderCheck>,
+    /// Each shell's process and folder when last seen at its prompt, by address:
+    /// a new folder there with the same process is a `cd` (follow.rs).
+    prompt_folders: HashMap<String, (Value, String)>,
     /// When Herdr started each terminal: a listing already in flight can't know them yet.
     born: RefCell<HashMap<String, Instant>>,
     /// Connection epoch: ignore replies from an old connection.
@@ -500,6 +510,8 @@ impl AppWindow {
             written_view: String::new(),
             person: settings::Person::default(),
             reply: None,
+            caller: None,
+            title: String::new(),
             written_where: HashMap::new(),
             written_seen: HashMap::new(),
             looked: HashMap::new(),
@@ -508,6 +520,7 @@ impl AppWindow {
             listed_once: false,
             cwds: HashMap::new(),
             folders_checked: HashMap::new(),
+            prompt_folders: HashMap::new(),
             born: RefCell::new(HashMap::new()),
             core_generation: 0,
             checking_closed: false,
@@ -1391,6 +1404,11 @@ impl AppWindow {
             self.kill(&doomed, cx);
         }
         self.model.order_spaces();
+        let title = window_title(&self.model);
+        if title != self.title {
+            window.set_window_title(&title);
+            self.title = title;
+        }
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
         let (mut terms, mods_visible) = self.visible();
@@ -1792,7 +1810,7 @@ impl AppWindow {
             let name = m.space_name(p, &home);
             for c in &p.tabs {
                 for a in model::addresses(&c.root) {
-                    want.insert(a, format!("{name} / {}", Model::tab_name(p, c)));
+                    want.insert(a, format!("{name} / {}", Model::tab_label(p, c)));
                 }
             }
             for a in p.floats.iter().flat_map(|f| model::addresses(&f.root)) {
@@ -2075,6 +2093,7 @@ impl AppWindow {
             }
         }
         self.track_folders(cx);
+        changed |= self.follow_folders(window, cx);
         for t in self.terms.values() {
             if self.live.get(&t.address).is_some_and(|r| r["pid"].as_u64().is_some()) {
                 t.view.update(cx, |v, cx| v.reattach_if_needed(self.core.clone(), cx));
@@ -2116,7 +2135,7 @@ impl AppWindow {
         let home = self.root_agent(addr);
         let place = self.model.pane_of(&home).and_then(|pane| {
             let (p, c) = (self.model.space_of(&pane)?, self.model.tab_of(&pane)?);
-            Some(format!("{} / {}", self.model.space_name(p, &self::home()), Model::tab_name(p, c)))
+            Some(format!("{} / {}", self.model.space_name(p, &self::home()), Model::tab_label(p, c)))
         });
         let (title, level) = match alert {
             model::Alert::Blocked => (format!("{name} needs you"), "error"),
@@ -2297,6 +2316,79 @@ impl AppWindow {
         }
     }
 
+    /// Shells that changed folder at their prompt go where it belongs
+    /// (follow.rs). Only the prompt counts, so a program running elsewhere
+    /// (`git -C`, `make -C`) moves nothing, and `cd x && make` follows once make
+    /// ends. A new process (a restart, a lost shell) starts afresh. Returns
+    /// whether the model changed now (a move lands when its labels are written).
+    fn follow_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let mut moves = Vec::new();
+        for (addr, rec) in &self.live {
+            let Some(cwd) = self.cwds.get(addr) else { continue };
+            if !at_prompt(rec) || self.changing_terminals.contains(addr) {
+                continue;
+            }
+            let now = (rec["pid"].clone(), cwd.clone());
+            if self.prompt_folders.get(addr).is_some_and(|was| changed_at_prompt(was, &now)) {
+                moves.push((addr.clone(), cwd.clone()));
+            }
+            self.prompt_folders.insert(addr.clone(), now);
+        }
+        self.prompt_folders.retain(|a, _| self.live.contains_key(a));
+        let mut changed = false;
+        for (addr, cwd) in moves {
+            changed |= self.follow(&addr, &cwd, window, cx);
+        }
+        changed
+    }
+
+    fn follow(&mut self, addr: &str, cwd: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(pane) = self.model.pane_of(addr) else { return false };
+        let (Some(from), Some(tab)) = (self.model.space_of(&pane), self.model.tab_of(&pane)) else { return false };
+        let machine = from.machine.clone();
+        if self.model.is_floats(&tab.id) || addr.split_once('/').map(|(m, _)| m) != machine.as_deref() || self.require_document(machine.as_deref()).is_err() {
+            return false;
+        }
+        let focused = self.model.active.as_deref() == Some(from.id.as_str()) && self.model.focused_pane().as_deref() == Some(pane.as_str());
+        let others: Vec<&str> = from.tabs.iter().flat_map(|c| c.root.terminals()).filter_map(|n| n.terminal()).filter(|a| *a != addr).collect();
+        let keeps_floats = others.is_empty() && from.floats.is_some();
+        let first = match others.first() {
+            None => cwd.to_owned(),
+            Some(a) => self.cwds.get(*a).cloned().unwrap_or_else(|| from.folder.clone()),
+        };
+        let from = from.id.clone();
+        let (space, path) = match crate::follow::decide(&self.model, &from, cwd, focused, &first, &self.person.repos, &home()) {
+            None => return false,
+            Some(crate::follow::Follow::Pin(path)) => {
+                self.model.space_mut(&from).unwrap().path = Some(path);
+                self.flush_documents(false, window, cx);
+                return true;
+            }
+            _ if keeps_floats => return false,
+            Some(crate::follow::Follow::Join(space)) => (space, None),
+            Some(crate::follow::Follow::Found(path)) => (self.model.fresh_id_on("sp", machine.as_deref()), Some(path)),
+        };
+        let tab = self.model.fresh_id_on("tb", machine.as_deref());
+        let change = TerminalChange::Move { space, tab, folder: cwd.to_owned(), path, focus: focused };
+        self.start_terminal_change(addr.to_owned(), change, window, cx);
+        false
+    }
+
+    /// Writes a terminal's labels back to where its pane is, after a move
+    /// that didn't land.
+    fn relabel(&self, addr: &str, cx: &mut Context<Self>) {
+        let Some(pane) = self.model.pane_of(addr) else { return };
+        let (Some(space), Some(tab)) = (self.model.space_of(&pane), self.model.tab_of(&pane)) else { return };
+        let machine = addr.split_once('/').map(|(m, _)| m);
+        let labels = json!({ "herdr.space": crate::mirror::local(&space.id, machine), "herdr.tab": crate::mirror::local(&tab.id, machine) });
+        let (core, addr) = (self.core.clone(), addr.to_owned());
+        cx.background_executor().spawn(async move {
+            if let Err(e) = core.call("terminal.label", json!({ "terminal": addr, "labels": labels })) {
+                tracing::warn!("cannot put {addr}'s labels back: {e:#}");
+            }
+        }).detach();
+    }
+
     fn terminal_ended(&mut self, block: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = block.strip_suffix(SWAP) {
             self.swapped.remove(pane);
@@ -2358,6 +2450,25 @@ impl AppWindow {
         let p = self.model.space(space);
         let here = p.and_then(|p| p.active_tab()).and_then(|c| c.focused_pane()).and_then(|f| self.model.address_of(&f)).and_then(|a| self.cwds.get(&a).cloned());
         here.or_else(|| p.map(|p| p.folder.clone())).unwrap_or_else(home)
+    }
+
+    /// Declares a space's folder (its pin, else where its focused terminal is)
+    /// as a repo in settings.json, or undeclares it (space.declare). Declaring
+    /// pins an unpinned space there, so the space owns the repo from now on.
+    fn declare(&mut self, space: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
+        let p = self.model.space(space).ok_or_else(|| format!("no space {space:?}"))?;
+        let machine = p.machine.clone();
+        let path = p.path.clone().unwrap_or_else(|| self.folder_for(space));
+        if path.is_empty() {
+            return Err("this space has no folder to declare".into());
+        }
+        let mut repos = settings::load_person().map_err(|e| format!("settings.json can't be changed until it's fixed: {e}"))?.repos;
+        let declared = crate::follow::toggle_repo(&mut repos, &path, machine.as_deref(), &home());
+        self.write_person(|person| person.repos = repos, window, cx);
+        if declared && let Some(p) = self.model.space_mut(space).filter(|p| p.path.is_none()) {
+            p.path = Some(path.clone());
+        }
+        Ok(json!({ "space": space, "path": path, "machine": machine, "declared": declared }))
     }
 
     /// The machine a space's terminals run on, None for this one.
@@ -2641,6 +2752,9 @@ impl AppWindow {
                 "herdr.space":crate::mirror::local(space, machine), "herdr.tab":crate::mirror::local(tab, machine),
             })),
             TerminalChange::Park => (false, json!({"herdr.space":"","herdr.tab":""})),
+            TerminalChange::Move { space, tab, .. } => (true, json!({
+                "herdr.space":crate::mirror::local(space, machine), "herdr.tab":crate::mirror::local(tab, machine),
+            })),
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.changing_terminals.insert(address.clone());
@@ -2671,6 +2785,9 @@ impl AppWindow {
         self.changing_terminals.remove(&address);
         if let Err(error) = result {
             tracing::error!("terminal change for {address} failed: {error}");
+            if matches!(change, TerminalChange::Move { .. }) {
+                self.relabel(&address, cx);
+            }
             if !self.draining { self.layout_notice("Could not change terminal pane", &error, window, cx); }
             return;
         }
@@ -2696,6 +2813,18 @@ impl AppWindow {
             }
             TerminalChange::Park => {
                 if let Some(pane) = self.model.pane_of(&address) { self.model.remove_pane(&pane); }
+            }
+            TerminalChange::Move { space, tab, folder, path, focus } => {
+                let Some(pane) = self.model.pane_of(&address) else { return };
+                let focus = focus && self.model.focused_pane().as_deref() == Some(pane.as_str());
+                let moved = if self.model.space(&space).is_some() {
+                    self.model.move_to_space(&pane, &space, &tab, focus)
+                } else {
+                    self.model.move_to_new_space(&pane, &space, &tab, &folder, path.as_deref(), focus)
+                };
+                if !moved {
+                    self.relabel(&address, cx);
+                }
             }
         }
         if !self.draining {
@@ -2864,9 +2993,10 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "tab.arrange" | "pane.split" | "pane.add" | "pane.close" | "pane.swap" | "float.new" | "float.toggle" | "terminal.keep" | "terminal.park") {
-            let node = ["id", "space", "pane", "tab"].into_iter().find_map(|k| Self::arg(&args, k));
-            let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "space.pin" | "space.declare" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "tab.arrange" | "pane.split" | "pane.add" | "pane.close" | "pane.swap" | "float.new" | "float.toggle" | "terminal.keep" | "terminal.park") {
+            let node = ["id", "space", "pane", "tab", "parent"].into_iter().find_map(|k| Self::arg(&args, k));
+            let caller_tab = (name == "tab.new" && node.is_none()).then(|| self.model.new_tab_parent(None, self.caller.as_deref(), None).ok().flatten()).flatten();
+            let target = node.or(caller_tab.as_deref()).and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
                 else if name == "terminal.park" { Self::arg(&args, "terminal").and_then(|a| a.split_once('/').map(|(m, _)| m)) }
                 else { target.and_then(|s| s.machine.as_deref()) };
@@ -2945,6 +3075,29 @@ impl AppWindow {
                 let Some(p) = self.model.space_mut(&id) else { return self.fail(format!("no space {id:?}")) };
                 p.name = name.trim().to_owned();
             }
+            "space.pin" => {
+                let Some(id) = Self::owned(a, "id").or_else(|| self.model.active.clone()).filter(|id| self.model.space(id).is_some()) else { return self.fail("no space to pin") };
+                let p = self.model.space(&id).unwrap();
+                let local = p.machine.is_none();
+                let path = match a.get("path").and_then(Value::as_str).map(str::trim) {
+                    Some("") => None,
+                    Some(path) => {
+                        let path = if local { crate::follow::expand(path, &home()) } else { path.to_owned() };
+                        if !crate::follow::absolute(&path) {
+                            return self.fail(format!("space.pin path {path:?} must be a full path (~ for this computer's home)"));
+                        }
+                        Some(path)
+                    }
+                    None => crate::follow::toggled_pin(p.path.as_deref(), &self.folder_for(&id), local).filter(|p| crate::follow::absolute(p)),
+                };
+                self.model.space_mut(&id).unwrap().path = path.clone();
+                self.answer(Ok(json!({ "space": id, "path": path })));
+            }
+            "space.declare" => {
+                let Some(id) = Self::owned(a, "id").or_else(|| self.model.active.clone()).filter(|id| self.model.space(id).is_some()) else { return self.fail("no space to declare") };
+                let r = self.declare(&id, window, cx);
+                self.answer(r);
+            }
             "space.move" => {
                 let (Some(id), Some(i)) = (Self::arg(a, "id"), a.get("index").and_then(Value::as_u64)) else { return self.fail("space.move needs id and index") };
                 if !self.model.move_space(id, i as usize) { return self.fail(format!("no space {id:?}")); }
@@ -2969,14 +3122,27 @@ impl AppWindow {
             // ---- tabs
             "tab.new" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
+                let parent = match self.model.new_tab_parent(Self::arg(a, "parent"), self.caller.as_deref(), Self::arg(a, "space")) {
+                    Ok(parent) => parent,
+                    Err(e) => return self.fail(e),
+                };
+                let space = Self::owned(a, "space").or_else(|| parent.as_deref().and_then(|t| self.model.space_of(t)).map(|p| p.id.clone()));
                 let r = match Self::owned(a, "mod") {
-                    Some(m) => self.new_mod_tab(Self::owned(a, "space"), name, m, a.get("props").cloned().unwrap_or(Value::Null)),
+                    Some(m) => self.new_mod_tab(space, name, m, a.get("props").cloned().unwrap_or(Value::Null)),
                     // A person's new tab with no space open starts one, as space.new does.
                     None if person && a.get("space").is_none() && self.model.active_space().is_none() => {
                         self.new_space("", Self::owned(a, "folder"), Some(name), Self::argv(a), Self::arg(a, "task"), None, window)
                     }
-                    None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task"), window),
+                    None => self.new_tab(space, name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task"), window),
                 };
+                let r = r.map(|mut made| {
+                    if let (Some(parent), Some(tab)) = (parent, made["tab"].as_str().map(str::to_owned))
+                        && self.model.nest(&tab, &parent)
+                    {
+                        made["parent"] = json!(parent);
+                    }
+                    made
+                });
                 self.answer(r);
             }
             "tab.close" => {
@@ -3836,7 +4002,10 @@ impl AppWindow {
     fn control(&mut self, cmd: Value, window: &mut Window, cx: &mut Context<Self>) -> Value {
         if let Some(name) = cmd.get("do").and_then(Value::as_str) {
             let args = cmd.get("args").cloned().unwrap_or(Value::Null);
-            return self.run_as(name, args, false, window, cx);
+            self.caller = cmd.get("caller").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_owned);
+            let reply = self.run_as(name, args, false, window, cx);
+            self.caller = None;
+            return reply;
         }
         if let Some(path) = cmd.get("shot").and_then(Value::as_str) {
             return match crate::control::save_shot(window, std::path::Path::new(path)) {
@@ -4752,6 +4921,23 @@ const FOLDER_FALLBACK: Duration = Duration::from_secs(60);
 fn busy(rec: &Value) -> bool {
     let program = |k: &str| rec["program"][k].as_bool() == Some(true);
     rec["status"] == "working" || !(program("shell") || program("agent"))
+}
+
+/// `<space> / <tab>` for the shown tab, a child tab as `parent › child`.
+fn window_title(m: &Model) -> String {
+    let Some((p, c)) = m.active_space().and_then(|p| Some((p, p.active_tab()?))) else { return "Herdr".into() };
+    format!("{} / {}", m.space_name(p, &home()), Model::tab_label(p, c))
+}
+
+/// The shell itself in front, not working: a folder change here is the person's `cd`.
+fn at_prompt(rec: &Value) -> bool {
+    rec["program"]["shell"].as_bool() == Some(true) && !busy(rec)
+}
+
+/// The same shell, at its prompt in another folder: a `cd`. A new process
+/// (a restart, a lost shell coming back) is a fresh start, not a move.
+fn changed_at_prompt(was: &(Value, String), now: &(Value, String)) -> bool {
+    was.0 == now.0 && was.1 != now.1
 }
 
 /// Whether to ask a terminal's folder for its repo and branch again: only when
@@ -5998,6 +6184,26 @@ export default class Probe extends View {
         assert!(!super::busy(&rec("done", false, true)), "an agent started from a shell, its turn over");
         assert!(super::busy(&rec("", false, false)), "vim in front of the shell");
         assert!(!super::busy(&rec("", true, false)), "the shell's prompt");
+    }
+
+    #[test]
+    fn only_a_shell_at_its_prompt_follows_its_folder() {
+        let rec = |status: &str, shell: bool, agent: bool| {
+            serde_json::json!({ "status": status, "program": { "shell": shell, "agent": agent } })
+        };
+        assert!(super::at_prompt(&rec("", true, false)));
+        assert!(!super::at_prompt(&rec("done", false, true)), "an agent between turns isn't busy, but it's no prompt");
+        assert!(!super::at_prompt(&rec("", false, false)), "vim in front of the shell");
+        assert!(!super::at_prompt(&rec("working", true, false)));
+    }
+
+    #[test]
+    fn a_restarted_shell_in_another_folder_is_no_cd() {
+        let at = |pid: u64, cwd: &str| (serde_json::json!(pid), cwd.to_owned());
+        assert!(super::changed_at_prompt(&at(7, "/a"), &at(7, "/b")));
+        assert!(!super::changed_at_prompt(&at(7, "/a"), &at(7, "/a")));
+        assert!(!super::changed_at_prompt(&at(7, "/a"), &at(9, "/b")), "a restart lands in its start folder");
+        assert!(!super::changed_at_prompt(&at(7, "/a"), &(serde_json::Value::Null, "/b".into())), "a lost shell");
     }
 
     #[test]

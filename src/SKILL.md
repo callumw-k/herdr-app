@@ -37,6 +37,10 @@ herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
 ```
 
+`tab.new` run from your terminal makes the new tab a child of your tab: it
+opens beside its siblings and reads `parent › child`. Pass `--parent <tab id>`
+to nest it elsewhere, or `--parent ''` for a top-level tab.
+
 For a remote space:
 
 ```sh

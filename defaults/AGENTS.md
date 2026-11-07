@@ -121,6 +121,14 @@ the highlighted line shows where it will land.
   ...), as in Herdr; `tab.rename` names it ("fix login"). A space
   has one or more; closing the last one closes the space (it stays in
   `recent`).
+- A tab can be a **child** of another tab in its space (`spaces()[i].tabs[j].parent`,
+  its id, null for a top-level tab; shared like its name). `herdr-app do tab.new`
+  run in a terminal makes the new tab a child of that terminal's tab;
+  `tab.new {parent}` names one, `parent: ""` makes a top-level tab. A child
+  opens after its parent's other children and reads `parent › child` in the
+  tab bar, the picker, the window title and `hc ls`; the agents list nests its
+  agents under its parent tab's first agent. Closing a parent hands its
+  children to the grandparent. Floats are never a parent.
 - A tab can be **settled** (`tab.settle`): put away on this screen, still running;
   `settled` on each tab. The shipped layouts don't use it (they list every
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
@@ -187,6 +195,22 @@ the highlighted line shows where it will land.
   arrangement, status, shown, focused}` or null; `panes()` and `agents()` mark
   floats `float: true` (their `tab` is the floats' id, an agent's `tab_index` 0).
   Float terminals carry `herdr.tab=<floats id>`.
+- A space can be **pinned** to a folder on its machine (`space.pin`,
+  `spaces()[i].path`, shared like its name): a shell whose folder changes at
+  its prompt (a `cd`) into that folder or below moves there as a new tab;
+  `cd x && make` moves once make ends, and a program working in another folder
+  (`git -C`, `make -C`) moves nothing. The deepest pin wins, and a shell whose
+  own space's pin is as deep stays. An unnamed pinned space is called after its
+  folder. **Declared repos** (`settings.json` `repos`) each own a space: the
+  first time the focused shell changes into one with no pinned space, it moves
+  into a new space pinned there, or its own space is pinned there when the
+  space already sits in that repo (or the shell is its only terminal).
+  `space.declare` declares or undeclares a space's folder. Only shells in tabs
+  follow (never floats), only on their own machine, and only folder changes of
+  the same shell count, so a restart moves nothing. A moved terminal keeps
+  running; its `herdr.space`/`herdr.tab` labels change with it. It takes the
+  screen with it only when it's the focused pane; a tab it leaves empty closes,
+  and so does its space, unless the space has floats: then the shell stays.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
   `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
   `agent.prev` follow its list.
@@ -568,10 +592,16 @@ The main ones:
   terminals start in that machine's home unless folder, and its tabs and
   splits stay there; `spaces()` gives each space's `machine`, null here),
   `space.close {id?, confirmed?}`, `space.rename {id?, name}` ("": Herdr's name again),
-  `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`.
+  `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`,
+  `space.pin {id?, path?}` (no path: pin where its focused terminal is, or unpin
+  when already pinned there; `""`: unpin; a path must be full, `~` is this
+  computer's home),
+  `space.declare {id?}` (toggles its folder in `settings.json` `repos` for its
+  machine; declaring pins it too).
   With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
-- Tabs: `tab.new {name?, space?, folder?, argv?, task?}` (argv: an
-  agent to run, task: its first message). Agents run in your interactive
+- Tabs: `tab.new {name?, space?, folder?, argv?, task?, parent?}` (argv: an
+  agent to run, task: its first message; parent: the tab it nests under, `""`
+  for top-level, default the tab of the terminal running `herdr-app do`). Agents run in your interactive
   shell (including fish), which stays open after the agent exits. A terminal
   that exits with a nonzero code within two seconds of launch shows an error
   toast with its exit code and last output lines. Or `tab.new {name?, space?, mod,
@@ -770,6 +800,14 @@ What's about the user, never a look:
   `"grid"` (default), `"stacked"`, or `"none"` (split by hand). Existing tabs keep theirs.
 - `float_width`, `float_height`: the floats' box over the tab area, up to `1` a
   share of it (default `0.9`), above `1` px at zoom 1.
+- `repos`: folders that each own a space (see pinned spaces under The model),
+  `[{"path": "~/code/herdr"}, {"path": "~/code/projects", "children": true},
+  {"path": "/srv/api", "machine": "vps"}]`. `children`: a projects folder,
+  each folder directly inside it a repo (never the folder itself). `machine`:
+  whose folder it is, absent for this computer; `~` is this computer's home,
+  so another machine's path is written in full. The deepest entry wins, so a
+  repo inside a projects folder beats it. `space.declare` adds and removes
+  plain entries.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:

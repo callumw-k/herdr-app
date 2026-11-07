@@ -7,7 +7,7 @@ use crate::arrangement::{Arrangement, arrange};
 use crate::layout::{Axis, Content, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A named piece of work in a space: its terminals and how they're split.
 #[derive(Clone, Debug)]
@@ -26,6 +26,9 @@ pub struct Tab {
     /// None: split by hand. Some: rebuilt evenly from the pane order whenever
     /// a pane comes or goes.
     pub arrangement: Option<Arrangement>,
+    /// The tab it was made from (a tab of the same space): it reads
+    /// `parent › child` and opens beside its siblings.
+    pub parent: Option<String>,
 }
 
 /// A place to work, plus the folder its new terminals start in.
@@ -38,6 +41,9 @@ pub struct Space {
     pub folder: String,
     /// The machine its terminals run on (`hc machine ls`); None: this one.
     pub machine: Option<String>,
+    /// The folder it's pinned to, on its machine: a shell that changes into
+    /// it (or below) moves here (follow.rs).
+    pub path: Option<String>,
     pub tabs: Vec<Tab>,
     /// The selected tab.
     pub active: Option<String>,
@@ -133,6 +139,7 @@ impl Tab {
             zoomed: None,
             settled: None,
             arrangement: None,
+            parent: None,
         }
     }
 
@@ -175,6 +182,35 @@ impl Space {
     /// The tab holding the keyboard: the floats while they have it, else the selected tab.
     pub fn focused_tab(&self) -> Option<&Tab> {
         self.shown_floats().filter(|_| self.floats_focused).or_else(|| self.active_tab())
+    }
+
+    /// Where a new child of `parent` goes: after its last descendant.
+    fn after_family(&self, parent: &str) -> Option<usize> {
+        let mut family = HashSet::from([parent]);
+        while let Some(t) = self.tabs.iter().find(|t| !family.contains(t.id.as_str()) && t.parent.as_deref().is_some_and(|p| family.contains(p))) {
+            family.insert(&t.id);
+        }
+        self.tabs.iter().rposition(|t| family.contains(t.id.as_str())).map(|i| i + 1)
+    }
+
+    /// Parents that don't hold (a tab gone from the space, itself, a loop) go:
+    /// those tabs are top-level.
+    pub fn tidy_parents(&mut self) {
+        for i in 0..self.tabs.len() {
+            let me = self.tabs[i].id.clone();
+            let mut seen = HashSet::new();
+            let mut up = self.tabs[i].parent.clone();
+            while let Some(p) = up {
+                if p == me || self.tab(&p).is_none() {
+                    self.tabs[i].parent = None;
+                    break;
+                }
+                if !seen.insert(p.clone()) {
+                    break;
+                }
+                up = self.tab(&p).and_then(|t| t.parent.clone());
+            }
+        }
     }
 
     /// The selected tab, else the first.
@@ -280,6 +316,9 @@ impl Model {
         if !p.name.is_empty() {
             return p.name.clone();
         }
+        if let Some(path) = &p.path {
+            return folder_name(path, home);
+        }
         let first = p.tabs.iter().flat_map(|c| c.root.terminals()).next();
         let folder = first
             .and_then(|n| n.terminal().and_then(|a| self.folder_info.get(a)).map(|f| f.top.clone()).or_else(|| self.pane_folders.get(&n.id).cloned()))
@@ -295,6 +334,53 @@ impl Model {
         (p.tabs.iter().position(|x| x.id == c.id).unwrap_or(0) + 1).to_string()
     }
 
+    /// The tab a new tab goes under: `parent` (a tab id; "": none), else the
+    /// tab of the terminal `caller` (the one that ran `herdr-app do`) when
+    /// it's an ordinary tab in `space` (the space the new tab goes to, if given).
+    pub fn new_tab_parent(&self, parent: Option<&str>, caller: Option<&str>, space: Option<&str>) -> Result<Option<String>, String> {
+        let in_space = |tab: &str| space.is_none_or(|s| self.space_of(tab).is_some_and(|p| p.id == s));
+        match parent {
+            Some("") => Ok(None),
+            Some(id) if self.tab(id).is_none() || self.is_floats(id) => Err(format!("no tab {id:?} to be the parent")),
+            Some(id) if !in_space(id) => Err(format!("tab {id:?} isn't in space {:?}", space.unwrap_or_default())),
+            Some(id) => Ok(Some(id.to_owned())),
+            None => Ok(caller
+                .and_then(|t| self.pane_of(t))
+                .and_then(|p| self.tab_of(&p))
+                .map(|t| t.id.clone())
+                .filter(|t| !self.is_floats(t) && in_space(t))),
+        }
+    }
+
+    /// Makes a tab a child of `parent`, a tab of its space that isn't its own
+    /// descendant: it moves after the parent's family.
+    pub fn nest(&mut self, tab: &str, parent: &str) -> bool {
+        let Some(p) = self.spaces.iter_mut().find(|p| p.tab(tab).is_some()) else { return false };
+        let mut up = Some(parent.to_owned());
+        while let Some(id) = up {
+            if id == tab {
+                return false;
+            }
+            up = p.tab(&id).and_then(|t| t.parent.clone());
+        }
+        if p.tab(parent).is_none() {
+            return false;
+        }
+        let mut t = p.tabs.remove(p.tabs.iter().position(|t| t.id == tab).unwrap());
+        t.parent = Some(parent.to_owned());
+        let at = p.after_family(parent).unwrap_or(p.tabs.len());
+        p.tabs.insert(at, t);
+        true
+    }
+
+    /// What a tab reads as where its family shows: `parent › child`.
+    pub fn tab_label(p: &Space, c: &Tab) -> String {
+        match c.parent.as_deref().and_then(|id| p.tab(id)) {
+            Some(parent) => format!("{} › {}", Self::tab_name(p, parent), Self::tab_name(p, c)),
+            None => Self::tab_name(p, c),
+        }
+    }
+
     pub fn add_space(&mut self, id: &str, name: &str, folder: &str, mut ctx: Tab) {
         ctx.arrangement = ctx.arrangement.or(self.default_arrangement);
         let active = Some(ctx.id.clone());
@@ -303,6 +389,7 @@ impl Model {
             name: name.to_owned(),
             folder: folder.to_owned(),
             machine: None,
+            path: None,
             tabs: vec![ctx],
             active,
             floats: None,
@@ -385,6 +472,51 @@ impl Model {
             return;
         }
         c.root = arrange(kind, &c.root.id, panes, aspect);
+    }
+
+    /// Takes a terminal pane out of its tab for another space: never a float,
+    /// never into its own space. A tab or space it leaves empty closes.
+    fn take_pane(&mut self, pane: &str, into: &str) -> Option<Node> {
+        let tab = self.tab_of(pane)?;
+        if self.is_floats(&tab.id) || self.space_of(pane)?.id == into {
+            return None;
+        }
+        let mut node = tab.root.find(pane).filter(|n| n.terminal().is_some())?.clone();
+        node.size = None;
+        self.remove_pane(pane);
+        Some(node)
+    }
+
+    /// Moves a terminal pane to a new tab `tab` in `space` (follow.rs). With
+    /// `focus` it's shown and focused; without, what each space shows stays.
+    pub fn move_to_space(&mut self, pane: &str, space: &str, tab: &str, focus: bool) -> bool {
+        let Some(keep) = self.space(space).map(|p| p.active.clone()) else { return false };
+        let Some(node) = self.take_pane(pane, space) else { return false };
+        self.add_tab(space, Tab::with_pane(tab, "", node));
+        if focus {
+            return self.focus_pane(pane);
+        }
+        self.space_mut(space).unwrap().active = keep;
+        true
+    }
+
+    /// Moves a terminal pane into a new space on its machine, pinned to `path`.
+    pub fn move_to_new_space(&mut self, pane: &str, space: &str, tab: &str, folder: &str, path: Option<&str>, focus: bool) -> bool {
+        if self.space(space).is_some() {
+            return false;
+        }
+        let machine = self.space_of(pane).and_then(|p| p.machine.clone());
+        let Some(node) = self.take_pane(pane, space) else { return false };
+        let shown = self.active.clone();
+        self.add_space(space, "", folder, Tab::with_pane(tab, "", node));
+        let p = self.space_mut(space).unwrap();
+        p.machine = machine;
+        p.path = path.map(str::to_owned);
+        if focus {
+            return self.focus_pane(pane);
+        }
+        self.active = shown.filter(|s| self.space(s).is_some()).or(Some(space.to_owned()));
+        true
     }
 
     /// Adds a pane to a space's floats, making them when it has none, and
@@ -502,6 +634,9 @@ impl Model {
         let p = &mut self.spaces[pi];
         let ci = p.tabs.iter().position(|c| c.id == ctx).unwrap();
         let removed = p.tabs.remove(ci);
+        for child in p.tabs.iter_mut().filter(|t| t.parent.as_deref() == Some(ctx)) {
+            child.parent = removed.parent.clone();
+        }
         if p.active.as_deref() == Some(ctx) {
             // The tab that slides into the slot, or the last one.
             p.active = p.tabs.get(ci).or(p.tabs.last()).map(|c| c.id.clone());
@@ -758,6 +893,7 @@ pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home
                 "status": m.rollup(&addresses(&c.root)),
                 "panes": c.root.panes().len(),
                 "arrangement": c.arrangement.map(Arrangement::name),
+                "parent": c.parent,
                 "zoomed": c.zoomed.is_some(),
                 "settled": c.settled.is_some(),
                 "settled_at": c.settled,
@@ -773,6 +909,7 @@ pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home
         "name": m.space_name(p, home),
         "named": !p.name.is_empty(),
         "folder": p.folder,
+        "path": p.path,
         "machine": p.machine,
         "branch": branch,
         "active": m.active.as_deref() == Some(&p.id),
@@ -851,6 +988,137 @@ mod tests {
         let mut m = Model::default();
         m.add_space("p1", "api", "/src/api", Tab::new("c1", "fix login", "x1", "t1"));
         m
+    }
+
+    #[test]
+    fn a_followed_pane_moves_to_a_new_tab_there_with_focus_only_when_asked() {
+        let mut m = model_with_one();
+        m.split("x1", Axis::Row, "x2", "t2");
+        m.add_space("p2", "web", "/src/web", Tab::new("c3", "deploy", "x3", "t3"));
+        m.add_tab("p2", Tab::new("c4", "", "x4", "t4"));
+        m.select_tab("c3");
+        m.focus_pane("x1");
+        assert!(m.move_to_space("x2", "p2", "c5", false));
+        assert_eq!(pane_order(&m, "c1"), ["x1"]);
+        assert_eq!(pane_order(&m, "c5"), ["x2"]);
+        assert_eq!(m.space("p2").unwrap().tabs.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["c3", "c5", "c4"]);
+        assert_eq!(m.space("p2").unwrap().active.as_deref(), Some("c3"), "a background move changes nothing shown");
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+        assert!(m.move_to_space("x1", "p2", "c6", true));
+        assert!(m.space("p1").is_none(), "its last pane leaving closes the space");
+        assert_eq!((m.active.as_deref(), m.focused_pane().as_deref()), (Some("p2"), Some("x1")));
+        assert_eq!(m.address_of("x1").as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn floats_and_moves_into_their_own_space_stay_put() {
+        let mut m = model_with_one();
+        m.add_float("p1", "f1", pane("y1", "u1"));
+        m.add_space("p2", "web", "/src/web", Tab::new("c3", "deploy", "x3", "t3"));
+        assert!(!m.move_to_space("y1", "p2", "c9", true));
+        assert!(!m.move_to_space("x1", "p1", "c9", true));
+        assert!(!m.move_to_space("x1", "missing", "c9", true));
+        assert_eq!(m.space_of("y1").map(|p| p.id.as_str()), Some("p1"));
+        assert_eq!(m.space_of("x1").map(|p| p.id.as_str()), Some("p1"));
+    }
+
+    #[test]
+    fn a_pane_founding_a_space_takes_its_machine_and_pin() {
+        let mut m = Model::default();
+        m.add_space("vps/p1", "", "/srv", Tab::new("vps/c1", "", "vps/x1", "vps/t1"));
+        m.space_mut("vps/p1").unwrap().machine = Some("vps".into());
+        m.split("vps/x1", Axis::Row, "vps/x2", "vps/t2");
+        assert!(m.move_to_new_space("vps/x2", "vps/p2", "vps/c2", "/srv/api/src", Some("/srv/api"), true));
+        let p = m.space("vps/p2").unwrap();
+        assert_eq!((p.machine.as_deref(), p.path.as_deref(), p.folder.as_str()), (Some("vps"), Some("/srv/api"), "/srv/api/src"));
+        assert_eq!(m.space_name(p, "/home/u"), "api");
+        assert_eq!(m.focused_pane().as_deref(), Some("vps/x2"));
+        assert!(!m.move_to_new_space("vps/x1", "vps/p2", "vps/c3", "/", None, true), "never over a space that exists");
+    }
+
+    fn add_child(m: &mut Model, id: &str, parent: &str) -> bool {
+        m.add_tab("p1", Tab::new(id, "", &format!("x-{id}"), &format!("t-{id}")));
+        m.nest(id, parent)
+    }
+
+    fn tab_order(m: &Model, space: &str) -> Vec<String> {
+        m.space(space).unwrap().tabs.iter().map(|t| t.id.clone()).collect()
+    }
+
+    #[test]
+    fn a_child_tab_opens_after_its_parents_family() {
+        let mut m = model_with_one();
+        m.add_tab("p1", Tab::new("c2", "docs", "x2", "t2"));
+        add_child(&mut m, "a", "c1");
+        add_child(&mut m, "g", "a");
+        m.select_tab("c2");
+        add_child(&mut m, "b", "c1");
+        assert_eq!(tab_order(&m, "p1"), ["c1", "a", "g", "b", "c2"]);
+        assert_eq!(m.active_tab().map(|t| t.id.as_str()), Some("b"));
+        assert!(!add_child(&mut m, "lost", "gone"));
+        assert_eq!(m.tab("lost").unwrap().parent, None, "a parent that isn't in the space: top-level");
+        assert!(!m.nest("c1", "g"), "never under its own descendant");
+        assert!(!m.nest("c1", "c1"));
+        assert_eq!(m.tab("c1").unwrap().parent, None);
+    }
+
+    #[test]
+    fn closing_a_parent_hands_its_children_to_the_grandparent() {
+        let mut m = model_with_one();
+        add_child(&mut m, "a", "c1");
+        add_child(&mut m, "g1", "a");
+        add_child(&mut m, "g2", "a");
+        m.remove_tab("a");
+        assert_eq!(m.tab("g1").unwrap().parent.as_deref(), Some("c1"));
+        assert_eq!(m.tab("g2").unwrap().parent.as_deref(), Some("c1"));
+        m.remove_tab("c1");
+        assert_eq!((m.tab("g1").unwrap().parent.clone(), m.tab("g2").unwrap().parent.clone()), (None, None));
+    }
+
+    #[test]
+    fn a_child_reads_parent_then_child() {
+        let mut m = model_with_one();
+        add_child(&mut m, "a", "c1");
+        add_child(&mut m, "b", "a");
+        let p = m.space("p1").unwrap();
+        assert_eq!(Model::tab_label(p, p.tab("a").unwrap()), "fix login › 2");
+        assert_eq!(Model::tab_label(p, p.tab("b").unwrap()), "2 › 3", "only the parent, not the whole line");
+        assert_eq!(Model::tab_label(p, p.tab("c1").unwrap()), "fix login");
+        assert_eq!(space_json(&m, p, 0, None, "/")["tabs"][1]["parent"], "c1");
+        assert!(space_json(&m, p, 0, None, "/")["tabs"][0]["parent"].is_null());
+    }
+
+    #[test]
+    fn parents_that_dont_hold_are_dropped() {
+        let mut m = model_with_one();
+        m.add_tab("p1", Tab::new("c2", "", "x2", "t2"));
+        m.add_tab("p1", Tab::new("c3", "", "x3", "t3"));
+        m.add_tab("p1", Tab::new("c4", "", "x4", "t4"));
+        let p = m.space_mut("p1").unwrap();
+        for (tab, parent) in [("c1", "c1"), ("c2", "c3"), ("c3", "c2"), ("c4", "missing")] {
+            p.tabs.iter_mut().find(|t| t.id == tab).unwrap().parent = Some(parent.into());
+        }
+        p.tidy_parents();
+        let parents: Vec<Option<&str>> = p.tabs.iter().map(|t| t.parent.as_deref()).collect();
+        assert_eq!(parents, [None, None, Some("c2"), None], "a loop is broken once, the rest of it kept");
+    }
+
+    #[test]
+    fn a_new_tabs_parent_is_the_named_one_else_the_callers_tab() {
+        let mut m = model_with_one();
+        m.add_tab("p1", Tab::new("c2", "", "x2", "t2"));
+        m.add_float("p1", "f1", pane("y1", "u1"));
+        m.add_space("p2", "web", "/src/web", Tab::new("c3", "", "x3", "t3"));
+        assert_eq!(m.new_tab_parent(None, Some("t2"), None), Ok(Some("c2".into())));
+        assert_eq!(m.new_tab_parent(None, Some("t2"), Some("p2")), Ok(None), "a tab for another space is top-level");
+        assert_eq!(m.new_tab_parent(None, Some("u1"), None), Ok(None), "floats are no parent");
+        assert_eq!(m.new_tab_parent(None, Some("t9"), None), Ok(None), "a terminal without a pane");
+        assert_eq!(m.new_tab_parent(None, None, None), Ok(None));
+        assert_eq!(m.new_tab_parent(Some(""), Some("t2"), None), Ok(None), "an empty parent: top-level, even from a pane");
+        assert_eq!(m.new_tab_parent(Some("c3"), Some("t2"), None), Ok(Some("c3".into())));
+        assert!(m.new_tab_parent(Some("c3"), None, Some("p1")).is_err());
+        assert!(m.new_tab_parent(Some("f1"), None, None).is_err());
+        assert!(m.new_tab_parent(Some("nope"), None, None).is_err());
     }
 
     #[test]

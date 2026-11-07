@@ -34,8 +34,12 @@ pub const COMMANDS: &[Command] = &[
     cmd("space.close", &[opt("id"), opt("confirmed")], "Close a space and end its terminals (asks first unless confirmed)."),
     cmd("space.rename", &[opt("id"), opt("name")], "Rename a space (asks the person when no name; an empty name: called after where its first terminal is again)."),
     cmd("space.move", &[req("id"), req("index")], "Move a space to a position (1 = first)."),
-    cmd("tab.new", &[opt("name"), opt("space"), opt("folder"), opt("argv"), opt("task"), opt("mod"), opt("props")],
-        "Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new)."),
+    cmd("space.pin", &[opt("id"), opt("path")],
+        "Pin a space (default: the shown one) to a folder on its machine: a shell whose folder changes at its prompt (a `cd`) into it or below moves to a new tab here (`cd x && make`: once make ends); the deepest pin wins. No path: pin where its focused terminal is, or unpin when it's already pinned there; a path must be full (`~`: this computer's home); empty path: unpin. An unnamed pinned space is called after its folder."),
+    cmd("space.declare", &[opt("id")],
+        "Declare a space's folder (its pin, else where its focused terminal is) as a repo in settings.json `repos`, for its machine, or undeclare it when it already is. Declaring pins the space there too. A declared repo gets its own space the first time the focused shell changes into it."),
+    cmd("tab.new", &[opt("name"), opt("space"), opt("folder"), opt("argv"), opt("task"), opt("mod"), opt("props"), opt("parent")],
+        "Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new). `parent`: the tab it nests under (its space unless `space`; \"\": top-level). Without it, `herdr-app do tab.new` run in a terminal nests the new tab under that terminal's tab. A child reads `parent › child` and opens after its parent's other children; closing a parent hands its children to the grandparent."),
     cmd("tab.close", &[opt("id"), opt("confirmed")], "Close a tab and end its terminals."),
     cmd("tab.rename", &[opt("id"), opt("name")], "Rename a tab (asks the person when no name; an empty name: called by its number again)."),
     cmd("tab.move", &[req("id"), req("index")], "Move a tab to a position in its space (1 = first)."),
@@ -143,7 +147,7 @@ pub fn validate_args(c: &Command, args: &Value) -> Result<(), String> {
                 return Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")));
             }
             for (key, value) in args {
-                if matches!(key.as_str(), "id" | "pane" | "space" | "terminal" | "target") && !value.is_string() && !value.is_null() {
+                if matches!(key.as_str(), "id" | "pane" | "space" | "terminal" | "target" | "parent") && !value.is_string() && !value.is_null() {
                     return Err(format!("{}: argument {key} must be a string (or null to omit it)", c.name));
                 }
             }
@@ -208,7 +212,7 @@ mod tests {
 
     #[test]
     fn malformed_targets_cannot_fall_back_to_the_current_work() {
-        for (name, arg) in [("tab.close", "id"), ("pane.close", "pane"), ("space.close", "id"), ("tab.new", "space"), ("terminal.show", "terminal"), ("pane.swap", "pane"), ("pane.swap", "target")] {
+        for (name, arg) in [("tab.close", "id"), ("pane.close", "pane"), ("space.close", "id"), ("tab.new", "space"), ("terminal.show", "terminal"), ("pane.swap", "pane"), ("pane.swap", "target"), ("tab.new", "parent")] {
             let c = find(name).unwrap();
             for value in [json!(123), json!(false), json!([]), json!({"id": "target"})] {
                 let error = validate_args(c, &json!({arg: value})).unwrap_err();
