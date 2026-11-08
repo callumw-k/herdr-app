@@ -110,7 +110,8 @@ the highlighted line shows where it will land.
   a space nobody named is called after where its first terminal is now
   (its repo, else its folder, `~` at home) and follows it; once named
   (`space.rename`), the name stays; renaming to "" goes back.
-  `spaces()[i].named` says which. Where a space is now is its terminals'
+  `spaces()[i].named` says which. When this machine's layout first loads
+  with no spaces, Herdr opens one at `~`. Where a space is now is its terminals'
   live folders (`panes()[i].cwd`), not the folder it was made in: new
   tabs start where its focused pane is, and the default mods take a
   space's repo from its first terminal.

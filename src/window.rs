@@ -662,8 +662,12 @@ impl AppWindow {
                     (machines_at, relist, last_tick) = (None, true, None);
                     if this.update_in(cx, |this, window, cx| {
                         if generation != this.core_generation { return; }
+                        let first = this.documents.get("").is_none_or(|s| s.document.is_none());
                         this.documents.entry(String::new()).or_default().connection(true, None, None);
                         this.documents_updated(None, vec![result], window, cx);
+                        if first && this.documents[""].document.is_some() && this.model.spaces.is_empty() {
+                            this.run_as("space.new", json!({}), false, window, cx);
+                        }
                         this.sync(window, cx);
                     }).is_err() { break; }
                 }
