@@ -319,11 +319,15 @@ impl Model {
         if let Some(path) = &p.path {
             return folder_name(path, home);
         }
+        folder_name(&self.first_folder(p), home)
+    }
+
+    /// Where a space's first terminal is (its checkout's top), else where it was made.
+    pub fn first_folder(&self, p: &Space) -> String {
         let first = p.tabs.iter().flat_map(|c| c.root.terminals()).next();
-        let folder = first
+        first
             .and_then(|n| n.terminal().and_then(|a| self.folder_info.get(a)).map(|f| f.top.clone()).or_else(|| self.pane_folders.get(&n.id).cloned()))
-            .unwrap_or_else(|| p.folder.clone());
-        folder_name(&folder, home)
+            .unwrap_or_else(|| p.folder.clone())
     }
 
     /// What a tab is called: its name, else its place in its space (1, 2, ...).
@@ -877,7 +881,8 @@ pub struct FolderInfo {
 
 /// A space as mods see it. `name` is what to call it; `named`: someone gave it
 /// (else it's Herdr's automatic name, which a mod may show its own way).
-pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home: &str) -> Value {
+/// `repo`: the declared repo it holds.
+pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, repo: Option<&str>, home: &str) -> Value {
     let active = p.active_tab().map(|c| c.id.clone());
     let tabs: Vec<Value> = p
         .tabs
@@ -910,6 +915,7 @@ pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home
         "named": !p.name.is_empty(),
         "folder": p.folder,
         "path": p.path,
+        "repo": repo,
         "machine": p.machine,
         "branch": branch,
         "active": m.active.as_deref() == Some(&p.id),
@@ -1084,8 +1090,8 @@ mod tests {
         assert_eq!(Model::tab_label(p, p.tab("a").unwrap()), "fix login › 2");
         assert_eq!(Model::tab_label(p, p.tab("b").unwrap()), "2 › 3", "only the parent, not the whole line");
         assert_eq!(Model::tab_label(p, p.tab("c1").unwrap()), "fix login");
-        assert_eq!(space_json(&m, p, 0, None, "/")["tabs"][1]["parent"], "c1");
-        assert!(space_json(&m, p, 0, None, "/")["tabs"][0]["parent"].is_null());
+        assert_eq!(space_json(&m, p, 0, None, None, "/")["tabs"][1]["parent"], "c1");
+        assert!(space_json(&m, p, 0, None, None, "/")["tabs"][0]["parent"].is_null());
     }
 
     #[test]

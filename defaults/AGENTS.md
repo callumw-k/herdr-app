@@ -207,7 +207,8 @@ the highlighted line shows where it will land.
   else another on its machine, which the shell moves into as a new tab, else
   the shell's own space when it's that space's only terminal. With no space in
   the repo, only the focused shell moves, into a new space pinned there.
-  `space.declare` declares or undeclares a space's folder. Only shells in tabs
+  `space.declare` declares or undeclares a space's folder, and
+  `spaces()[i].repo` is the declared repo a space is in. Only shells in tabs
   follow (never floats), only on their own machine, and only folder changes of
   the same shell count, so a restart moves nothing. A moved terminal keeps
   running; its `herdr.space`/`herdr.tab` labels change with it. It takes the

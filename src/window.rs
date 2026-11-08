@@ -1748,7 +1748,9 @@ impl AppWindow {
                 // The branch of the terminal the space shows first.
                 let first = p.active_tab().and_then(|c| c.focused_pane()).and_then(|pane| m.address_of(&pane));
                 let branch = first.and_then(|a| m.folder_info.get(&a)).and_then(|f| f.branch.clone());
-                model::space_json(m, p, i, branch.as_deref(), &home)
+                let folder = p.path.clone().unwrap_or_else(|| m.first_folder(p));
+                let repo = crate::follow::declared(&folder, &self.person.repos, p.machine.as_deref(), &home);
+                model::space_json(m, p, i, branch.as_deref(), repo.as_deref(), &home)
             })
             .collect();
         // A window's terminal with the keyboard first, then a layout terminal block.

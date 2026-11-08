@@ -130,6 +130,8 @@ export interface SpaceInfo {
   folder: string;
   /** The folder it's pinned to (space.pin), on its machine: shells that change into it move here. Null: not pinned. */
   path: string | null;
+  /** The declared repo (settings.json `repos`) its pin, else its first terminal's folder, is in. Null: none. */
+  repo: string | null;
   /** The machine it lives on (`hc machine ls`), null for this one. */
   machine: string | null;
   /** The git branch of the terminal it shows first, if any. */
