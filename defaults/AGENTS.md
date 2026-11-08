@@ -201,10 +201,12 @@ the highlighted line shows where it will land.
   `cd x && make` moves once make ends, and a program working in another folder
   (`git -C`, `make -C`) moves nothing. The deepest pin wins, and a shell whose
   own space's pin is as deep stays. An unnamed pinned space is called after its
-  folder. **Declared repos** (`settings.json` `repos`) each own a space: the
-  first time the focused shell changes into one with no pinned space, it moves
-  into a new space pinned there, or its own space is pinned there when the
-  space already sits in that repo (or the shell is its only terminal).
+  folder. **Declared repos** (`settings.json` `repos`) each own a space. When a
+  shell changes into one with no pinned space, a space already in it (its first
+  terminal's folder is inside) is pinned there: the shell's own space first,
+  else another on its machine, which the shell moves into as a new tab, else
+  the shell's own space when it's that space's only terminal. With no space in
+  the repo, only the focused shell moves, into a new space pinned there.
   `space.declare` declares or undeclares a space's folder. Only shells in tabs
   follow (never floats), only on their own machine, and only folder changes of
   the same shell count, so a restart moves nothing. A moved terminal keeps

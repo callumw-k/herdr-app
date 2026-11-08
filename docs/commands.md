@@ -68,7 +68,7 @@ Pin a space (default: the shown one) to a folder on its machine: a shell whose f
 
 ## `space.declare`
 
-Declare a space's folder (its pin, else where its focused terminal is) as a repo in settings.json `repos`, for its machine, or undeclare it when it already is. Declaring pins the space there too. A declared repo gets its own space the first time the focused shell changes into it.
+Declare a space's folder (its pin, else where its focused terminal is) as a repo in settings.json `repos`, for its machine, or undeclare it when it already is. Declaring pins the space there too. A declared repo is held by one space: a shell that changes into it joins the space already in it, which is pinned there, and the focused shell starts one when none is.
 
 | Argument | Required |
 |---|---|

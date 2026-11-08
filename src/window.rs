@@ -33,6 +33,12 @@ use std::time::{Duration, Instant, SystemTime};
 const HEADER_HEIGHT: f32 = 30.0;
 const HANDLE: f32 = 6.0;
 const STACK_BAR_HEIGHT: f32 = 26.0;
+/// How often the window catches up with the core when nothing urgent arrives.
+const TICK: Duration = Duration::from_millis(500);
+/// How often machines, which send no events, are asked about.
+const MACHINES_EVERY: Duration = Duration::from_millis(2500);
+/// The least time between two catch-ups, however busy the terminals are.
+const SOON: Duration = Duration::from_millis(50);
 
 // The three native buttons plus their trailing breathing room (also used by the tabs mod).
 const TRAFFIC_LIGHT_WIDTH: f32 = 64.0;
@@ -631,7 +637,8 @@ impl AppWindow {
             let mut subscription = None;
             let mut subscribed_generation = u64::MAX;
             let mut event_lines = crate::hc::EventLines::default();
-            let (mut tick, mut relist) = (0u64, false);
+            let (mut machines_at, mut relist) = (None::<Instant>, false);
+            let mut last_tick: Option<Instant> = None;
             loop {
                 let Ok((core, generation)) = this.update(cx, |this, _| {
                     (this.core.clone(), this.core_generation)
@@ -652,7 +659,7 @@ impl AppWindow {
                         event_lines = crate::hc::EventLines::new(&snapshot);
                         (channel, events)
                     });
-                    (tick, relist) = (0, true);
+                    (machines_at, relist, last_tick) = (None, true, None);
                     if this.update_in(cx, |this, window, cx| {
                         if generation != this.core_generation { return; }
                         this.documents.entry(String::new()).or_default().connection(true, None, None);
@@ -660,9 +667,10 @@ impl AppWindow {
                         this.sync(window, cx);
                     }).is_err() { break; }
                 }
-                let ask_machines = tick.is_multiple_of(5);
-                tick += 1;
+                let ask_machines = machines_at.is_none_or(|at| at.elapsed() >= MACHINES_EVERY);
+                if ask_machines { machines_at = Some(Instant::now()); }
                 let relisting = std::mem::take(&mut relist);
+                let executor = cx.background_executor().clone();
                 let (sub, machines, refresh, listed, lines) = cx.background_executor().spawn(async move {
                     // The local stream forwards remote doc events too.
                     let mut sub = subscription;
@@ -672,16 +680,32 @@ impl AppWindow {
                         sub = Some((channel, events));
                         (refresh, terminals) = (true, true);
                     }
-                    let mut closed = false;
+                    let (mut closed, mut woken) = (false, false);
                     if let Some((channel, events)) = &sub {
-                        while let Ok(event) = events.try_recv() {
+                        loop {
+                            let event = match events.try_recv() {
+                                Ok(event) => event,
+                                Err(_) => {
+                                    let until = last_tick.map(|at| at + if woken { SOON } else { TICK });
+                                    let left = until.map_or(Duration::ZERO, |u| u.saturating_duration_since(Instant::now()));
+                                    if closed || left.is_zero() { break; }
+                                    match events.recv().with_timeout(left, &executor).await {
+                                        Ok(Ok(event)) => event,
+                                        Ok(Err(_)) => { (refresh, closed) = (true, true); break; }
+                                        Err(_) => break,
+                                    }
+                                }
+                            };
                             if let crate::hc::Stream::Data(bytes) = event {
                                 let pushed = event_lines.push(&bytes);
                                 refresh |= pushed.docs;
                                 terminals |= pushed.terminals;
+                                woken |= pushed.foreground;
                                 core.credit(*channel, bytes.len());
                             } else { (refresh, closed) = (true, true); }
                         }
+                    } else {
+                        executor.timer(last_tick.map_or(Duration::ZERO, |at| (at + TICK).saturating_duration_since(Instant::now()))).await;
                     }
                     // A stream that ended is subscribed to again, with a fresh snapshot.
                     if closed { sub = None; }
@@ -713,7 +737,7 @@ impl AppWindow {
                     this.fit_hidden_tabs(window, cx);
                     this.flush_documents(refresh, window, cx);
                 }).is_err() { break; }
-                cx.background_executor().timer(Duration::from_millis(500)).await;
+                last_tick = Some(Instant::now());
             }
         }));
         w._tasks.push(cx.spawn_in(window, async move |this, cx| {
@@ -2350,28 +2374,39 @@ impl AppWindow {
             return false;
         }
         let focused = self.model.active.as_deref() == Some(from.id.as_str()) && self.model.focused_pane().as_deref() == Some(pane.as_str());
-        let others: Vec<&str> = from.tabs.iter().flat_map(|c| c.root.terminals()).filter_map(|n| n.terminal()).filter(|a| *a != addr).collect();
-        let keeps_floats = others.is_empty() && from.floats.is_some();
-        let first = match others.first() {
-            None => cwd.to_owned(),
-            Some(a) => self.cwds.get(*a).cloned().unwrap_or_else(|| from.folder.clone()),
-        };
+        let keeps_floats = from.floats.is_some() && from.tabs.iter().flat_map(|c| c.root.terminals()).filter_map(|n| n.terminal()).all(|a| a == addr);
+        let firsts: HashMap<String, String> = self.model.spaces.iter().filter(|p| p.machine == machine).filter_map(|p| {
+            let first = p.tabs.iter().flat_map(|c| c.root.terminals()).filter_map(|n| n.terminal()).find(|a| *a != addr);
+            let folder = match first {
+                Some(a) => self.cwds.get(a).cloned().unwrap_or_else(|| p.folder.clone()),
+                None if p.id == from.id => return None,
+                None => p.folder.clone(),
+            };
+            Some((p.id.clone(), folder))
+        }).collect();
         let from = from.id.clone();
-        let (space, path) = match crate::follow::decide(&self.model, &from, cwd, focused, &first, &self.person.repos, &home()) {
+        let (space, path, pinned) = match crate::follow::decide(&self.model, &from, cwd, focused, &firsts, &self.person.repos, &home()) {
             None => return false,
             Some(crate::follow::Follow::Pin(path)) => {
                 self.model.space_mut(&from).unwrap().path = Some(path);
                 self.flush_documents(false, window, cx);
                 return true;
             }
-            _ if keeps_floats => return false,
-            Some(crate::follow::Follow::Join(space)) => (space, None),
-            Some(crate::follow::Follow::Found(path)) => (self.model.fresh_id_on("sp", machine.as_deref()), Some(path)),
+            Some(crate::follow::Follow::Adopt(space, path)) => {
+                self.model.space_mut(&space).unwrap().path = Some(path);
+                self.flush_documents(false, window, cx);
+                (space, None, true)
+            }
+            Some(crate::follow::Follow::Join(space)) => (space, None, false),
+            Some(crate::follow::Follow::Found(path)) => (self.model.fresh_id_on("sp", machine.as_deref()), Some(path), false),
         };
+        if keeps_floats {
+            return pinned;
+        }
         let tab = self.model.fresh_id_on("tb", machine.as_deref());
         let change = TerminalChange::Move { space, tab, folder: cwd.to_owned(), path, focus: focused };
         self.start_terminal_change(addr.to_owned(), change, window, cx);
-        false
+        pinned
     }
 
     /// Writes a terminal's labels back to where its pane is, after a move

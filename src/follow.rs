@@ -1,10 +1,12 @@
 //! Spaces that follow directories: a space pinned to a folder takes the
-//! shells that change into it, and repos declared in settings.json each get
-//! a space the first time the focused shell goes into one. Paths belong to
-//! their machine: another machine's are compared as written.
+//! shells that change into it, and each repo declared in settings.json is
+//! held by one space: the space already in it, pinned there, else a new one
+//! the first time the focused shell goes into it. Paths belong to their
+//! machine: another machine's are compared as written.
 
 use crate::model::{Model, Space};
 use crate::settings::Repo;
+use std::collections::HashMap;
 
 /// Where a shell that just changed folder goes.
 #[derive(Debug, PartialEq)]
@@ -13,6 +15,9 @@ pub enum Follow {
     Join(String),
     /// Its own space already sits in this declared repo: pin it there.
     Pin(String),
+    /// Another space already sits in this declared repo: pin it there, and
+    /// go into it as a new tab.
+    Adopt(String, String),
     /// Into a new space pinned to this declared repo.
     Found(String),
 }
@@ -89,12 +94,15 @@ pub fn declared(cwd: &str, repos: &[Repo], machine: Option<&str>, home: &str) ->
     best.map(|(path, _)| path)
 }
 
-/// Where a shell in `from` that just changed to `cwd` goes (Cerdr's rules).
-/// The deepest pinned space on its machine that holds `cwd` takes it, unless
-/// its own space's pin is as deep: two spaces pinned to one folder never trade
-/// a shell back and forth. Otherwise only the focused shell (`focused`) may
-/// go to a declared repo; `first` is the folder of its space's first terminal.
-pub fn decide(model: &Model, from: &str, cwd: &str, focused: bool, first: &str, repos: &[Repo], home: &str) -> Option<Follow> {
+/// Where a shell in `from` that just changed to `cwd` goes. The deepest
+/// pinned space on its machine that holds `cwd` takes it, unless its own
+/// space's pin is as deep: two spaces pinned to one folder never trade a shell
+/// back and forth. Otherwise a declared repo is held by the unpinned space
+/// already in it (its first terminal's folder, from `firsts`, which leaves
+/// out the shell itself and so lacks `from` when the shell is alone): its own
+/// space before another, a lone shell's space only when no other is. Only the
+/// focused shell (`focused`) starts a new space for a repo.
+pub fn decide(model: &Model, from: &str, cwd: &str, focused: bool, firsts: &HashMap<String, String>, repos: &[Repo], home: &str) -> Option<Follow> {
     let source = model.space(from)?;
     let machine = source.machine.as_deref();
     let local = machine.is_none();
@@ -111,14 +119,21 @@ pub fn decide(model: &Model, from: &str, cwd: &str, focused: bool, first: &str, 
     if let Some((p, d)) = best {
         return own.is_none_or(|o| o < d).then(|| Follow::Join(p.id.clone()));
     }
-    if !focused || own.is_some() {
+    if own.is_some() {
         return None;
     }
     let repo = declared(cwd, repos, machine, home)?;
-    if claims(&repo, first, local).is_some() {
+    let unpinned_in_repo = |p: &Space| p.path.is_none() && firsts.get(&p.id).is_some_and(|f| claims(&repo, f, local).is_some());
+    if unpinned_in_repo(source) {
         return Some(Follow::Pin(repo));
     }
-    Some(Follow::Found(repo))
+    if let Some(p) = model.spaces.iter().find(|p| p.id != from && p.machine.as_deref() == machine && unpinned_in_repo(p)) {
+        return Some(Follow::Adopt(p.id.clone(), repo));
+    }
+    if source.path.is_none() && !firsts.contains_key(from) {
+        return Some(Follow::Pin(repo));
+    }
+    focused.then_some(Follow::Found(repo))
 }
 
 /// A space's pin after the pin key at `cwd`: pinned there, or cleared when
@@ -154,6 +169,10 @@ mod tests {
 
     fn projects(path: &str) -> Repo {
         Repo { path: path.into(), children: true, machine: None }
+    }
+
+    fn firsts(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(p, f)| (p.to_string(), f.to_string())).collect()
     }
 
     fn spaces(pins: &[(&str, Option<&str>, Option<&str>)]) -> Model {
@@ -230,39 +249,59 @@ mod tests {
     #[test]
     fn a_shell_joins_the_deepest_pinned_space_on_its_own_machine() {
         let m = spaces(&[("here", None, None), ("repo", Some("/r"), None), ("wt", Some("/r/wt"), None), ("far", Some("/r/wt"), Some("vps"))]);
-        assert_eq!(decide(&m, "here", "/r/wt/src", false, "/", &[], "/h"), Some(Follow::Join("wt".into())));
-        assert_eq!(decide(&m, "here", "/r/src", false, "/", &[], "/h"), Some(Follow::Join("repo".into())));
-        assert_eq!(decide(&m, "here", "/elsewhere", true, "/", &[], "/h"), None);
+        assert_eq!(decide(&m, "here", "/r/wt/src", false, &firsts(&[("here", "/")]), &[], "/h"), Some(Follow::Join("wt".into())));
+        assert_eq!(decide(&m, "here", "/r/src", false, &firsts(&[("here", "/")]), &[], "/h"), Some(Follow::Join("repo".into())));
+        assert_eq!(decide(&m, "here", "/elsewhere", true, &firsts(&[("here", "/")]), &[], "/h"), None);
     }
 
     #[test]
     fn a_shell_stays_when_its_own_pin_is_as_deep_so_twins_never_trade_it() {
         let m = spaces(&[("a", Some("/r"), None), ("b", Some("/r"), None), ("wt", Some("/r/wt"), None)]);
-        assert_eq!(decide(&m, "a", "/r/src", true, "/r", &[repo("/r")], "/h"), None);
-        assert_eq!(decide(&m, "b", "/r", true, "/r", &[], "/h"), None);
-        assert_eq!(decide(&m, "a", "/r/wt", true, "/r", &[], "/h"), Some(Follow::Join("wt".into())), "a deeper pin still wins");
+        assert_eq!(decide(&m, "a", "/r/src", true, &firsts(&[("a", "/r")]), &[repo("/r")], "/h"), None);
+        assert_eq!(decide(&m, "b", "/r", true, &firsts(&[("b", "/r")]), &[], "/h"), None);
+        assert_eq!(decide(&m, "a", "/r/wt", true, &firsts(&[("a", "/r")]), &[], "/h"), Some(Follow::Join("wt".into())), "a deeper pin still wins");
     }
 
     #[test]
     fn a_shell_on_another_machine_never_goes_to_a_space_here() {
         let m = spaces(&[("far", None, Some("vps")), ("near", Some("/r"), None)]);
-        assert_eq!(decide(&m, "far", "/r/src", true, "/", &[repo("/r")], "/h"), None);
+        assert_eq!(decide(&m, "far", "/r/src", true, &firsts(&[("far", "/")]), &[repo("/r")], "/h"), None);
     }
 
     #[test]
     fn only_the_focused_shell_founds_a_space_for_a_declared_repo() {
         let m = spaces(&[("here", None, None)]);
         let repos = [repo("/r")];
-        assert_eq!(decide(&m, "here", "/r/src", false, "/other", &repos, "/h"), None);
-        assert_eq!(decide(&m, "here", "/r/src", true, "/other", &repos, "/h"), Some(Follow::Found("/r".into())));
+        assert_eq!(decide(&m, "here", "/r/src", false, &firsts(&[("here", "/other")]), &repos, "/h"), None);
+        assert_eq!(decide(&m, "here", "/r/src", true, &firsts(&[("here", "/other")]), &repos, "/h"), Some(Follow::Found("/r".into())));
     }
 
     #[test]
     fn a_space_already_in_the_declared_repo_is_pinned_rather_than_twinned() {
         let m = spaces(&[("here", None, None)]);
-        assert_eq!(decide(&m, "here", "/r/src", true, "/r/docs", &[repo("/r")], "/h"), Some(Follow::Pin("/r".into())));
+        assert_eq!(decide(&m, "here", "/r/src", true, &firsts(&[("here", "/r/docs")]), &[repo("/r")], "/h"), Some(Follow::Pin("/r".into())));
         let pinned_elsewhere_inside = spaces(&[("here", Some("/r"), None)]);
-        assert_eq!(decide(&pinned_elsewhere_inside, "here", "/r/src", true, "/r", &[repo("/r")], "/h"), None, "its own pin holds it");
+        assert_eq!(decide(&pinned_elsewhere_inside, "here", "/r/src", true, &firsts(&[("here", "/r")]), &[repo("/r")], "/h"), None, "its own pin holds it");
+    }
+
+    #[test]
+    fn a_declared_repo_already_open_elsewhere_takes_the_shell_instead_of_a_twin() {
+        let m = spaces(&[("scratch", None, None), ("app", None, None), ("pinned", Some("/q"), None), ("far", None, Some("vps"))]);
+        let repos = [repo("/r")];
+        let open = firsts(&[("scratch", "/notes"), ("app", "/r/src"), ("pinned", "/r"), ("far", "/r")]);
+        assert_eq!(decide(&m, "scratch", "/r/docs", false, &open, &repos, "/h"), Some(Follow::Adopt("app".into(), "/r".into())), "any shell, focused or not");
+        let none_open = firsts(&[("scratch", "/notes"), ("pinned", "/r"), ("far", "/r")]);
+        assert_eq!(decide(&m, "scratch", "/r/docs", true, &none_open, &repos, "/h"), Some(Follow::Found("/r".into())), "a space pinned elsewhere or on another machine isn't the repo's");
+        assert_eq!(decide(&m, "scratch", "/r/docs", false, &none_open, &repos, "/h"), None);
+    }
+
+    #[test]
+    fn a_lone_shell_joins_the_repos_space_before_pinning_its_own() {
+        let m = spaces(&[("mine", None, None), ("app", None, None)]);
+        let repos = [repo("/r")];
+        assert_eq!(decide(&m, "mine", "/r/src", true, &firsts(&[("app", "/r")]), &repos, "/h"), Some(Follow::Adopt("app".into(), "/r".into())));
+        assert_eq!(decide(&m, "mine", "/r/src", false, &firsts(&[("app", "/elsewhere")]), &repos, "/h"), Some(Follow::Pin("/r".into())));
+        assert_eq!(decide(&m, "mine", "/r/src", true, &firsts(&[("mine", "/r"), ("app", "/r")]), &repos, "/h"), Some(Follow::Pin("/r".into())), "its own space's other shells keep it");
     }
 
     #[test]

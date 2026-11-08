@@ -51,6 +51,8 @@ pub struct Pushed {
     /// A layout document changed, or events were missed: read them again.
     pub docs: bool,
     pub terminals: bool,
+    /// A terminal's foreground program or folder changed: worth acting on now.
+    pub foreground: bool,
 }
 
 impl EventLines {
@@ -109,6 +111,7 @@ impl EventLines {
                         pushed.docs = true;
                     } else {
                         pushed.terminals |= self.apply(p);
+                        pushed.foreground |= p["type"] == "foreground";
                     }
                 }
                 _ => {}
@@ -570,8 +573,8 @@ mod tests {
         assert!(got.terminals && !got.docs);
         assert_eq!(addresses(&lines), ["t1", "t2"]);
         assert_eq!(lines.live()["terminals"][0]["title"], "hi");
-        lines.push(event(8, "status", "t2", json!({"status": {"state": "working"}, "records": {}, "reported": true})).as_bytes());
-        lines.push(event(9, "foreground", "t2", json!({"pid": 7, "name": "vim", "argv": ["vim"], "cwd": "/src"})).as_bytes());
+        assert!(!lines.push(event(8, "status", "t2", json!({"status": {"state": "working"}, "records": {}, "reported": true})).as_bytes()).foreground);
+        assert!(lines.push(event(9, "foreground", "t2", json!({"pid": 7, "name": "vim", "argv": ["vim"], "cwd": "/src"})).as_bytes()).foreground, "a cd or a program starting is acted on now");
         assert_eq!(lines.live()["terminals"][1]["status"]["state"], "working");
         assert_eq!(lines.live()["terminals"][1]["foreground"]["cwd"], "/src");
         lines.push(event(10, "finished", "t1", json!({"reason": "exited", "exit_code": 0, "signal": null, "finished_ms": 1})).as_bytes());

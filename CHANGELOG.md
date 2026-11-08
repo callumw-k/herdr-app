@@ -1,5 +1,13 @@
 # Herdr changelog
 
+## [0.2.1] - 2026-11-08
+
+### New
+- **Spaces can follow your folders.** Alt+. pins the shown space to its folder, and a shell that cds into that folder, or anywhere below it, moves to the space once it's back at its prompt. Folders listed under repos in settings each get one space: a shell that cds in joins the space already open there, which gets pinned, and the focused shell starts one when there isn't one. Alt+Shift+. adds or removes the shown space's folder. A shell only moves between spaces on its own machine, and floats stay where they are.
+- **Tabs can nest.** herdr-app do tab.new run in a terminal opens the new tab under that terminal's tab: it reads "parent › child", opens next to its siblings, and when the parent closes its children move up a level. --parent picks another tab, and --parent '' makes a top-level one. In the agents list, an agent in a child tab sits under the parent tab's agent.
+- The window title shows the space and tab.
+- If you've edited your keys.json, add "alt-.": "space.pin" and "alt->": "space.declare" yourself.
+
 ## [0.2.0] - 2026-11-07
 
 ### New
