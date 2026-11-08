@@ -21,6 +21,10 @@ tmp=$(mktemp "$target.XXXXXX")
 cp "$built" "$tmp"
 chmod 755 "$tmp"
 mv -f "$tmp" "$target"
+app=${target%/Contents/MacOS/*}
+if [[ $app != "$target" ]]; then
+  codesign --force --sign - "$app"
+fi
 echo "Installed $built -> $target. Quit and reopen Herdr to use the new build."
 
 if [[ -e "$(dirname "$target").new" ]]; then
