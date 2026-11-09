@@ -2,7 +2,126 @@
 
 Herdr is a desktop app for terminals and coding agents. Keep work in spaces, see which agents need you, and leave terminals running when you close the window.
 
-## Install
+This is a fork of [herdrdev/herdr-app](https://github.com/herdrdev/herdr-app). It adds tab arrangements, floating terminals, spaces that follow your folders and nested tabs, covered in [What this fork adds](#what-this-fork-adds).
+
+## Install this fork
+
+The fork has no release builds, so build it from source. You need Rust 1.95.0, Zig 0.16.0 and [just](https://github.com/casey/just), plus the Linux development packages listed in [CI](.github/workflows/ci.yml).
+
+```sh
+git clone --recurse-submodules https://github.com/callumw-k/herdr-app.git
+cd herdr-app
+```
+
+On Linux and macOS, if Herdr is already installed (from the [upstream installers](#install-upstream-herdr) below, say), swap the fork's build into it:
+
+```sh
+scripts/install-local
+```
+
+It builds a release, replaces the `herdr-app` on your PATH and leaves the rest of the install as it is. On macOS it re-signs `Herdr.app` afterwards. If it warns that a downloaded update is waiting, that update replaces the fork's build the next time you quit, so run the script again after reopening Herdr.
+
+For a fresh install, use the platform installer instead:
+
+```sh
+just install
+```
+
+It builds a release and adds Herdr to your desktop (`~/Applications/Herdr.app` on macOS). It doesn't install [herdr-core](https://github.com/herdrdev/herdr-core), but the app offers to install a core when it can't find one.
+
+Quit and reopen Herdr to use the new build. Builds from source don't update themselves, so pull and run the same command again to update.
+
+## What this fork adds
+
+On macOS the Alt keys below are Option, which acts as Alt by default on US and ABC keyboard layouts.
+
+### Tab arrangements
+
+A tab can lay its panes out as even columns, even rows, a grid, or stacked (the focused pane full size, the others folded to title bars). An arranged tab lays itself out again whenever a pane opens or closes. Dragging a divider holds until the next change, and splitting by hand turns the arrangement off for that tab.
+
+| Key | Action |
+| --- | --- |
+| Alt+] / Alt+[ | Next or previous arrangement (`tab.arrange`) |
+| Alt+N | Add a pane in the tab's arrangement (`pane.add`) |
+
+Alt+] and Alt+[ no longer switch tabs. Ctrl+Tab and Ctrl+PageUp/PageDown still do.
+
+### Floating terminals
+
+A space can keep terminals floating over all of its tabs, in a box in the middle of the tab area. They stay put when you switch tabs, are arranged like a tab, and close with the space, never with a tab.
+
+| Key | Action |
+| --- | --- |
+| Alt+F | Open, focus or hide the floats (`float.toggle`) |
+| Alt+Shift+F | Open another float (`float.new`) |
+
+### Spaces that follow your folders
+
+Pin a space to a folder and any shell that `cd`s into that folder, or anywhere below it, moves to that space as a new tab once it's back at its prompt. `cd x && make` moves once `make` ends, and a program working in another folder (`git -C`, `make -C`) moves nothing. The deepest pin wins.
+
+Folders listed under `repos` in settings each own one space. A shell that `cd`s into one joins the space already open there, which gets pinned, and the focused shell starts a new space when there isn't one. A pin shows next to a space in the sidebar when it's pinned or in a declared repo.
+
+| Key | Action |
+| --- | --- |
+| Alt+. | Pin the shown space to its folder, or unpin it (`space.pin`) |
+| Alt+Shift+. | Add or remove the shown space's folder from `repos` (`space.declare`) |
+
+A shell only moves between spaces on its own machine, and floats never move.
+
+### Nested tabs
+
+`herdr-app do tab.new` run in a terminal opens the new tab under that terminal's tab. It reads `parent › child` in the tab bar, the picker and the window title, and opens next to its siblings. In the agents list, an agent in a child tab sits under the parent tab's agent. When a parent closes, its children move up a level.
+
+```sh
+herdr-app do tab.new --parent <tab id>   # nest under another tab
+herdr-app do tab.new --parent ''         # top-level tab
+```
+
+### Smaller changes
+
+- The window title shows the space and tab.
+- When this machine's layout first loads with no spaces, Herdr opens one at `~`.
+
+### Settings
+
+Four new keys in `~/.config/herdr-app/settings.json`:
+
+```json
+{
+  "arrangement": "grid",
+  "float_width": 0.9,
+  "float_height": 0.9,
+  "repos": [
+    { "path": "~/code/herdr" },
+    { "path": "~/code/projects", "children": true },
+    { "path": "/srv/api", "machine": "vps" }
+  ]
+}
+```
+
+- `arrangement`: how new tabs lay out their panes: `vertical`, `horizontal`, `grid` (default), `stacked`, or `none` to split by hand. Existing tabs keep theirs.
+- `float_width`, `float_height`: the floats' box. Up to `1` is a share of the tab area (default `0.9`), above `1` is pixels at zoom 1.
+- `repos`: folders that each own a space. With `children`, every folder directly inside it is a repo, but not the folder itself. `machine` names another machine, and its paths are written in full, since `~` is this computer's home. The deepest entry wins, so a repo inside a projects folder beats the projects folder.
+
+If you've edited your `keys.json`, add the new keys yourself:
+
+```json
+"alt-]": "tab.arrange:next",
+"alt-[": "tab.arrange:prev",
+"alt-n": "pane.add",
+"alt-f": "float.toggle",
+"alt-shift-f": "float.new",
+"alt-.": "space.pin",
+"alt-shift-.": "space.declare"
+```
+
+### The agent guide
+
+Herdr writes [defaults/AGENTS.md](defaults/AGENTS.md) to `~/.config/herdr-app/AGENTS.md` on every start, and that's how agents working in your Herdr learn what it can do. The fork's version covers everything above: the commands (`tab.arrange`, `pane.add`, `float.new`, `float.toggle`, `float.show`, `space.pin`, `space.declare`, and `tab.new` with `parent`), the new settings, and the `arrangement`, `floats`, `path`, `repo` and `parent` fields mods read from `spaces()`. `herdr-app --skill` also explains nested tabs. The [command reference](docs/commands.md) lists each command's arguments.
+
+## Install upstream Herdr
+
+These install upstream Herdr from herdr.dev, without the fork's features. Use them to get herdr-core and the desktop app in place before running `scripts/install-local`.
 
 ### Linux and macOS
 
@@ -118,7 +237,7 @@ Clone this repo with its submodules. Use Rust 1.95.0 and Zig 0.16.0, the version
 Linux needs the development packages listed in that workflow.
 
 ```sh
-git clone --recurse-submodules https://github.com/herdrdev/herdr-app.git
+git clone --recurse-submodules https://github.com/callumw-k/herdr-app.git
 cd herdr-app
 just build
 just test
