@@ -2,7 +2,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, layout } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -16,13 +16,13 @@ function find(node, id) {
 // The sidebar's rail goes by its width, not a flag: dragging its edge narrows it too.
 const narrow = () => (find(layout(), "sidebar")?.size?.px ?? Infinity) < 160;
 
-// To the rail (on macOS wide enough for the traffic lights), or back to the width it had.
+// To the rail, or back to the width it had.
 function toggleSidebar() {
   const width = find(layout(), "sidebar")?.size?.px;
   if (!narrow()) setShared("sidebar.width", width);
   // Mods edited before the rail went by width still read the flag.
   setShared("sidebar.collapsed", !narrow());
-  run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : window()?.platform === "macos" ? 76 : 44 });
+  run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : 52 });
 }
 
 const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
@@ -222,14 +222,14 @@ export default class Agents extends View {
   }
 
   // compact: a ! for blocked where a header already says "Needs you".
-  status(t, a, compact = false) {
+  status(t, a, compact = false, big = false) {
     const color = t[a.status] ?? t.dim;
-    if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
-    if (a.status === "blocked" && compact) return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
+    if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(big ? 14 : 12).mx(1).flex_none().text_color(t.working).spin(900);
+    if (a.status === "blocked" && compact) return div().size(big ? 16 : 14).flex_none().rounded(big ? 5 : 4).bg(t.blocked + "26").text_size(big ? 12 : 10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
     if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
     // Idle: a ring; done: a dot.
-    if (a.status === "idle") return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
-    return div().size(7).mx(3).flex_none().rounded(4).bg(a.status === "done" ? color : t.dim + "00");
+    if (a.status === "idle") return div().size(big ? 9 : 7).mx(3).flex_none().rounded(big ? 5 : 4).border(1.5).border_color(t.idle ?? t.dim);
+    return div().size(big ? 9 : 7).mx(3).flex_none().rounded(big ? 5 : 4).bg(a.status === "done" ? color : t.dim + "00");
   }
 
   render(cx) {
@@ -326,19 +326,21 @@ export default class Agents extends View {
       // An agent on another machine (`vps/t7`) says which.
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
       if (collapsed) {
-        return h_flex().flex_none().justify_center().child(h_flex()
+        return h_flex()
           .id(`ag-${a.address}`)
-          .w(32)
-          .h(26)
-          .rounded(6)
+          .w_full()
+          .h(34)
+          .flex_none()
+          .rounded(8)
           .items_center()
           .justify_center()
           .gap(2)
+          .text_size(15)
           .when(a.focused, (el) => el.bg(t.selected))
           .when(!a.focused, (el) => el.hover((s) => s.bg(t.hover)))
           .on_click(() => run("pane.focus", { pane: a.pane }))
-          .child(div().w(14).whitespace_nowrap().text_right().text_color(a.focused ? t.foreground : t.muted).child(String(i + 1)))
-          .child(h_flex().w(14).flex_none().items_center().justify_center().child(this.status(t, a, true))));
+          .child(div().w(18).whitespace_nowrap().text_right().text_color(a.focused ? t.foreground : t.muted).child(String(i + 1)))
+          .child(h_flex().w(16).flex_none().items_center().justify_center().child(this.status(t, a, true, true)));
       }
       const when = this.since(a);
       const idle = a.status === "idle" && !a.focused;
@@ -472,19 +474,26 @@ export default class Agents extends View {
       .when(list.length === 0 && !collapsed, (el) =>
         el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
-      .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
+      .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 4 : 8).when(collapsed, (el) => el.gap(4).pt(6)).overflow_y_scrollbar().mode("always").children(rows))
       .when(collapsed, (el) =>
         el.child(
           h_flex()
-            .h(28)
+            .py(4)
+            .px(4)
             .items_center()
             .justify_center()
             .child(
               div()
                 .id("collapse")
-                .text_size(13)
+                .w_full()
+                .h(30)
+                .rounded(8)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(15)
                 .text_color(t.dim)
-                .hover((s) => s.text_color(t.foreground))
+                .hover((s) => s.bg(t.hover).text_color(t.foreground))
                 .on_click(toggleSidebar)
                 .child("»"),
             ),

@@ -480,8 +480,8 @@ The default window:
 Sidebar on the right: swap the two children of `root`. No sidebar: set
 `"hidden": true` on `sidebar` (the user can toggle it: `ctrl-shift-b`).
 Narrower than 160px, the sidebar mods draw a compact rail; folding resizes
-`sidebar` to 44 (76 on macOS, room for the traffic lights). On macOS,
-the tabs also leave room for the window buttons when the sidebar is narrower.
+`sidebar` to 52. On macOS the window buttons overhang the tab strip when
+the sidebar is narrower than they are, and the tabs leave room for them.
 
 ### Layouts and mods other people made
 

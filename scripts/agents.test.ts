@@ -269,3 +269,23 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a pinned child tab ag
   expect(pinned.order.slice(0, 2)).toEqual(["t2", "t4"]);
   expect(familyRender(sort, { width: 44 }).order).toHaveLength(4);
 });
+
+test("both rail toggles fold to 52 on every platform and unfold to the saved width", async () => {
+  for (const mod of ["agents", "workspace-chrome"]) {
+    const src = (await readFile(new URL(`../defaults/mods/${mod}/main.js`, import.meta.url), "utf8"))
+      .replace(/^import .*;\n/gm, "").replace(/^export default class/m, "class");
+    for (const platform of ["macos", "linux", "windows"]) {
+      for (const [px, saved, want] of [[268, undefined, 52], [52, 300, 300]] as const) {
+        const runs: unknown[][] = [];
+        const shares: unknown[][] = [];
+        const toggle = new Function("View", "layout", "window", "shared", "setShared", "run", `${src}; return toggleSidebar;`)(
+          class {}, () => ({ id: "sidebar", size: { px } }), () => ({ platform }),
+          () => saved, (...args: unknown[]) => shares.push(args), (...args: unknown[]) => runs.push(args),
+        );
+        toggle();
+        expect(runs).toEqual([["layout.resize", { id: "sidebar", px: want }]]);
+        if (px === 268) expect(shares).toContainEqual(["sidebar.width", 268]);
+      }
+    }
+  }
+});
