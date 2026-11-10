@@ -451,13 +451,15 @@ export default class Spaces extends View {
       .w(RAIL_CELL)
       .h(26)
       .rounded(6)
+      .gap(2)
       .justify_center()
       .items_center()
       .when(w.active, (el) => el.bg(t.selected))
       .when(!w.active, (el) => el.hover((s) => s.bg(t.hover)))
       .on_click(() => run("space.select", { id: w.id }))
-      .child(div().text_color(w.active ? t.foreground : t.muted).child(String(i + 1)))
-      .child(div().absolute().right(5).text_color(tone(t, w.status)).child(glyph(w.status))));
+      .child(div().w(14).whitespace_nowrap().text_right().text_color(w.active ? t.foreground : t.muted).child(String(i + 1)))
+      .child(h_flex().w(14).flex_none().justify_center()
+        .child(div().size(glyph(w.status) === "●" ? 7 : 3).rounded(4).bg(tone(t, w.status)))));
   }
 
   render() {
