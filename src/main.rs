@@ -1,5 +1,5 @@
-// Windows: a window app, no console of its own (see `attach_console`).
-#![cfg_attr(windows, windows_subsystem = "windows")]
+// Windows: a window app, but tests inherit Cargo's console for their child processes.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod arrangement;
 mod bench;
@@ -118,6 +118,7 @@ fn main() {
         )
         .init();
 
+    update::leave_install_folder();
     if update::apply_on_startup() {
         return;
     }
@@ -137,7 +138,7 @@ fn main() {
                 Ok(core) => hc::check(&core.hello).map(|()| core).map_err(setup::Need::Fix),
                 Err(e) => {
                     eprintln!("herdr-app: {e:#}");
-                    Err(setup::Need::Connect(format!("{e:#}")))
+                    Err(setup::Need::connection(e))
                 }
             }
         }
@@ -155,7 +156,8 @@ fn main() {
     }
 
     gpui_platform::application()
-        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()))
+        // Mods run programs already; the user's own links (dotfiles, Nix) may point out.
+        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()).following_links())
         .run(move |cx| {
             let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
             if let Err(e) = cx.text_system().add_fonts(fonts) {

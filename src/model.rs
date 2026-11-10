@@ -29,6 +29,9 @@ pub struct Tab {
     /// The tab it was made from (a tab of the same space): it reads
     /// `parent › child` and opens beside its siblings.
     pub parent: Option<String>,
+    /// Fields of its document entry this build doesn't read (a newer build's),
+    /// written back as they were.
+    pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A place to work, plus the folder its new terminals start in.
@@ -53,6 +56,9 @@ pub struct Space {
     pub floats_shown: bool,
     /// The floats hold the keyboard (only while shown).
     pub floats_focused: bool,
+    /// Fields of its document entry this build doesn't read (a newer build's),
+    /// written back as they were.
+    pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A closed space, so opening it again doesn't ask for its name.
@@ -140,6 +146,7 @@ impl Tab {
             settled: None,
             arrangement: None,
             parent: None,
+            rest: Default::default(),
         }
     }
 
@@ -399,6 +406,7 @@ impl Model {
             floats: None,
             floats_shown: false,
             floats_focused: false,
+            rest: Default::default(),
         });
         self.recent.retain(|r| r.name != name);
         self.active = Some(id.to_owned());

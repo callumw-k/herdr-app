@@ -24,6 +24,9 @@ pub struct SharedSpace {
     tabs: Vec<SharedTab>,
     #[serde(skip_serializing_if = "Option::is_none")]
     floats: Option<SharedTab>,
+    /// Fields this build doesn't read, kept so a newer build's survive this one's write.
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,6 +41,9 @@ struct SharedTab {
     arrangement: Option<Arrangement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<String>,
+    /// Fields this build doesn't read, kept so a newer build's survive this one's write.
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 
 fn empty_root() -> Node {
@@ -107,14 +113,14 @@ impl SharedTab {
     fn capture(t: &Tab, map: &impl Fn(&str) -> String) -> Self {
         let mut root = t.root.clone();
         map_node(&mut root, map);
-        SharedTab { id: map(&t.id), name: t.name.clone(), root, arrangement: t.arrangement, parent: t.parent.as_deref().map(map) }
+        SharedTab { id: map(&t.id), name: t.name.clone(), root, arrangement: t.arrangement, parent: t.parent.as_deref().map(map), rest: t.rest.clone() }
     }
 
     fn tab(&self, map: &impl Fn(&str) -> String) -> Tab {
         let mut root = self.root.clone();
         map_node(&mut root, map);
         let parent = self.parent.as_deref().filter(|p| !p.is_empty()).map(map);
-        Tab { id: map(&self.id), name: self.name.clone(), root, focused: None, before: vec![], zoomed: None, settled: None, arrangement: self.arrangement, parent }
+        Tab { id: map(&self.id), name: self.name.clone(), root, focused: None, before: vec![], zoomed: None, settled: None, arrangement: self.arrangement, parent, rest: self.rest.clone() }
     }
 }
 
@@ -133,6 +139,7 @@ impl Document {
                     path: s.path.clone(),
                     tabs: s.tabs.iter().map(|t| SharedTab::capture(t, &map)).collect(),
                     floats: s.floats.as_ref().map(|t| SharedTab::capture(t, &map)),
+                    rest: s.rest.clone(),
                 })
                 .collect(),
         }
@@ -154,6 +161,7 @@ impl Document {
             floats: s.floats.as_ref().map(|t| Tab { parent: None, ..t.tab(&map) }).filter(|t| !t.root.panes().is_empty()),
             floats_shown: false,
             floats_focused: false,
+            rest: s.rest.clone(),
         });
         model.spaces.splice(at..at, spaces);
         for s in model.spaces.iter_mut().filter(|s| s.machine.as_deref() == machine) {
@@ -332,6 +340,30 @@ mod tests {
         saved.apply_machine(&mut m, None);
         assert!(m.agents["t1"].seen);
     }
+    /// A newer build may add fields to a space or tab (#718's `floating`): this
+    /// build writes them back as they were, so a mixed-version machine keeps them.
+    #[test]
+    fn unknown_space_and_tab_fields_survive_a_read_and_write() {
+        let text = serde_json::json!({"spaces":[{"id":"s","name":"work","folder":"/w","color":"teal","tabs":[{"id":"t","name":"","root":
+            {"id":"t","type":"row","children":[{"id":"p","type":"block","content":{"terminal":"t1"}}]},
+            "floating":[{"pane":{"id":"q","type":"block","content":{"terminal":"t2"}},"rect":[0.2,0.2,0.6,0.6]}]}]}]});
+        let read: Document = serde_json::from_value(text.clone()).unwrap();
+        for machine in [None, Some("mac")] {
+            let mut m = Model::default();
+            read.replace(&mut m, machine);
+            let id = |s: &str| qualify(s, machine);
+            m.split(&id("p"), Axis::Row, &id("p2"), &id("t3"));
+            let written = serde_json::to_value(Document::capture(&m, machine)).unwrap();
+            assert_eq!(written["spaces"][0]["color"], "teal", "{machine:?}");
+            assert_eq!(written["spaces"][0]["tabs"][0]["floating"], text["spaces"][0]["tabs"][0]["floating"], "{machine:?}");
+        }
+        // Read and written alone: the same document.
+        let mut m = Model::default();
+        read.replace(&mut m, None);
+        assert_eq!(serde_json::to_value(Document::capture(&m, None)).unwrap(), text);
+        assert!(!serde_json::to_string(&Document::capture(&model(), None)).unwrap().contains("rest"), "nothing extra: no field");
+    }
+
     #[test]
     fn shared_fields_can_be_omitted() {
         let doc: Document = serde_json::from_value(serde_json::json!({"spaces":[{"id":"s","tabs":[{"id":"t"}]}]})).unwrap();
