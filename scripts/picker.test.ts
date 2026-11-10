@@ -23,11 +23,12 @@ const source = await readFile(new URL("../defaults/mods/picker/main.js", import.
 const element = () => new Element();
 const commands: unknown[][] = [];
 let testSpaces: any[] = [];
+let testAgents: any[] = [];
 let closed = 0;
 const values: Record<string, any> = {
   View: class {}, div: element, svg: element, v_flex: element, h_flex: element,
   Input: { new: element }, InputState: { new: () => ({ handlers: {} as Record<string, any>, on(name: string, handler: any) { this.handlers[name] = handler; }, focus() {} }) },
-  agents: () => [], spaces: () => testSpaces, terminals: () => [], theme: () => ({ hover: "hover" }),
+  agents: () => testAgents, spaces: () => testSpaces, terminals: () => [], theme: () => ({ hover: "hover" }),
   settings: () => ({ zoom: 1.2 }), props: () => ({}), shared: () => ({}),
   setShared() {}, closeOverlay() { closed++; }, openOverlay() {}, run(...args: unknown[]) { commands.push(args); }, hc() {},
 };
@@ -35,6 +36,7 @@ const Picker = new Function(...Object.keys(values), source.replace(/^import .*;\
 const cx = { notify() {}, stop_propagation() {}, timer: { after() {} }, focus_handle() {}, spawn() {} };
 function picker(machines = 12) {
   testSpaces = [];
+  testAgents = [];
   closed = 0;
   const view = new Picker();
   view.init({}, cx);
@@ -188,4 +190,25 @@ test("picker preserves small pixel touchpad deltas", () => {
     list.calls.on_scroll_wheel[0]({ delta: { y: delta } }, cx);
     expect(view.scroll).toBe(-delta);
   }
+});
+
+test("picker names an unnamed tab after its agent's title, unless the title says nothing", () => {
+  const view = picker(0);
+  const claude = { key: "claude", name: "Claude Code" };
+  testSpaces = [{ id: "s", name: "vault", status: "working", tabs: [
+    { id: "t1", name: "1", named: false },
+    { id: "t2", name: "deploy", named: true },
+    { id: "t3", name: "3", named: false },
+    { id: "t4", name: "4", named: false },
+  ] }];
+  testAgents = [
+    { address: "a1", tab: "t1", title: "\u2733 Fix sidebar rail", program: claude },
+    { address: "a2", tab: "t2", title: "Review the PR", program: claude },
+    { address: "a3", tab: "t3", title: "~/code/vault", program: claude },
+    { address: "a4", tab: "t4", title: "Claude Code", program: claude },
+  ];
+  const labels = (rows: any[]) => rows.filter((r) => r.kind === "ctx").map((r) => r.label);
+  expect(labels(view.rows())).toEqual(["Fix sidebar rail", "deploy", "3", "4"]);
+  view.filter = "sidebar";
+  expect(labels(view.rows())).toEqual(["Fix sidebar rail"]);
 });

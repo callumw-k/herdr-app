@@ -28,6 +28,18 @@ function spaceColors() {
   if (changed) setShared("space.colors", kept);
   return kept;
 }
+const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
+
+// The agents list's rule: a tab nobody named reads as its agent's own title.
+function title(tab, a) {
+  const prog = a?.program?.name;
+  const live = clean(a?.title);
+  // clean() would strip a path's leading ~ or /: test the title with only its status glyph gone.
+  const path = /^[~/]|^[A-Za-z]:\\/.test((a?.title ?? "").replace(/^[^\p{L}\p{N}~/]+/u, ""));
+  const telling = live && live !== prog && !path && !live.includes("@") && live.toLowerCase() !== a?.program?.key;
+  return (tab.name === prog || !tab.named) && telling ? live : tab.name;
+}
+
 function spaceColor(t, p) {
   if (p.name === "~") return t.dim;
   const c = spaceColors()[p.id] ?? PROJECT_COLORS[0];
@@ -79,7 +91,8 @@ export default class Picker extends View {
         .map((ctx) => {
           const mine = all.filter((a) => a.tab === ctx.id);
           const parent = ctx.parent ? w.tabs.find((x) => x.id === ctx.parent) : null;
-          const label = parent ? `${parent.name} › ${ctx.name}` : ctx.name;
+          const name = title(ctx, mine[0]);
+          const label = parent ? `${parent.name} › ${name}` : name;
           return { w, ctx, label, mine, team: teamOf(mine.map((a) => a.address)) };
         })
         .filter((c) => !f || [w.name, c.label, ...c.mine.map((a) => a.program?.name ?? "")].join(" ").toLowerCase().includes(f));
