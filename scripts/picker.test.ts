@@ -138,7 +138,7 @@ test("picker clicking earlier keeps selection on the toggle when rows shift", ()
   expect(find(tree, "pk-quiet-tab").calls.bg).toEqual(["hover"]);
 });
 
-test("picker search selects the first matching tab before earlier", () => {
+test("picker search selects the best matching tab, quiet spaces included", () => {
   for (const busyMatches of [false, true]) {
     const view = picker(0);
     testSpaces = [
@@ -158,28 +158,50 @@ test("picker search selects the first matching tab before earlier", () => {
   }
 });
 
-test("picker search still lets arrows select and unfold earlier", () => {
+test("picker search drops the groups and earlier, and clearing it brings them back", () => {
   const view = picker(0);
-  testSpaces = [{ id: "quiet", name: "quiet", tabs: [{ id: "quiet-tab", name: "quiet tab" }] }];
-  commands.length = 0;
-  view.input.value = () => "quiet tab";
-  view.input.handlers.change({}, cx);
-  let tree = view.render();
-  expect(find(tree, "pk-quiet-tab").calls.bg).toEqual(["hover"]);
-  tree.calls.on_key_down[0]({ key: "up" }, cx);
-  tree = view.render();
-  expect(find(tree, "pk-earlier").calls.bg).toEqual(["hover"]);
-  view.input.handlers.submit({}, cx);
-  tree = view.render();
-  expect(view.showEarlier).toBe(true);
-  expect(find(tree, "pk-earlier").calls.bg).toEqual(["hover"]);
-  expect(closed).toBe(0);
-  expect(commands).toEqual([]);
-  tree.calls.on_key_down[0]({ key: "down" }, cx);
-  view.render();
-  view.input.handlers.submit({}, cx);
-  expect(commands).toEqual([["tab.select", { id: "quiet-tab" }]]);
-  expect(closed).toBe(1);
+  testSpaces = [
+    { id: "busy", name: "busy", status: "working", tabs: [{ id: "busy-tab", name: "busy tab", active: true }], active: true },
+    { id: "quiet", name: "quiet", tabs: [{ id: "quiet-tab", name: "quiet tab" }] },
+  ];
+  view.filter = "tab";
+  expect(view.rows().map((r: any) => r.kind)).toEqual(["ctx", "ctx", "new"]);
+  view.filter = "";
+  expect(view.rows().map((r: any) => r.kind)).toEqual(["head", "ctx", "earlier", "new", "space"]);
+});
+
+test("picker search matches words in any order and ranks word starts over scattered letters", () => {
+  const view = picker(0);
+  testSpaces = [{ id: "s", name: "chezmoi", status: "working", tabs: [
+    { id: "scattered", name: "secret plans archive cache entries" },
+    { id: "close", name: "Herdr-app space close confirmation prompt" },
+  ] }];
+  const ids = (q: string) => { view.filter = q; return view.rows().filter((r: any) => r.kind === "ctx").map((r: any) => r.ctx.id); };
+  expect(ids("close herdr")).toEqual(["close"]);
+  expect(ids("chez close")).toEqual(["close"]);
+  expect(ids("space")).toEqual(["close", "scattered"]);
+});
+
+test("picker search finds a tab by its agent's address and title, below a label match", () => {
+  const view = picker(0);
+  testSpaces = [{ id: "s", name: "work", status: "working", tabs: [
+    { id: "t1", name: "deploy", named: true },
+    { id: "t2", name: "t23 notes", named: true },
+  ] }];
+  testAgents = [{ address: "t23", tab: "t1", title: "Rolling back staging", program: { key: "claude", name: "Claude Code" } }];
+  view.filter = "t23";
+  expect(view.rows().filter((r: any) => r.kind === "ctx").map((r: any) => r.ctx.id)).toEqual(["t2", "t1"]);
+  view.filter = "staging";
+  expect(view.rows().filter((r: any) => r.kind === "ctx").map((r: any) => r.ctx.id)).toEqual(["t1"]);
+});
+
+test("picker search keeps only matching new rows, and all of them when nothing matches", () => {
+  const view = picker(0);
+  view.machines = ["claude-vm"];
+  const labels = (q: string) => { view.filter = q; return view.rows().map((r: any) => r.kind + (r.machine ? `:${r.machine}` : "")); };
+  expect(labels("new sp")).toEqual(["space", "space:claude-vm"]);
+  expect(labels("vm")).toEqual(["space:claude-vm"]);
+  expect(labels("zzz")).toEqual(["new", "space", "space:claude-vm"]);
 });
 
 test("picker preserves small pixel touchpad deltas", () => {

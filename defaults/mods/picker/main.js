@@ -46,13 +46,75 @@ function spaceColor(t, p) {
   return c.startsWith("#") ? c : (MARK[c] ?? t[c]);
 }
 
+function chip(t, w, size, radius, text) {
+  return h_flex().size(size).flex_none().rounded(radius).bg(spaceColor(t, w)).items_center().justify_center().text_size(text).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?");
+}
+
+function lit(t, text, hits, color) {
+  if (!hits?.length) return div().truncate().text_color(color).child(text);
+  const parts = [];
+  let cur = "";
+  let on = false;
+  let i = 0;
+  for (const ch of text) {
+    const h = hits.includes(i);
+    if (h !== on && cur) {
+      parts.push([cur, on]);
+      cur = "";
+    }
+    on = h;
+    cur += ch;
+    i += ch.length;
+  }
+  if (cur) parts.push([cur, on]);
+  return h_flex().overflow_hidden().children(parts.map(([s, h]) => div().flex_none().text_color(h ? t.accent : color).when(h, (d) => d.font_semibold()).child(s.replace(/ /g, "\u00a0"))));
+}
+
+const actionLabel = (r) => (r.kind === "new" ? "new tab" : r.machine ? `new space on ${r.machine}` : "new space");
+
+function fuzzy(q, text) {
+  const t = text.toLowerCase();
+  let best = null;
+  for (let from = t.indexOf(q[0]); from >= 0; from = t.indexOf(q[0], from + 1)) {
+    let score = 0;
+    let at = from;
+    let run = 0;
+    const hits = [];
+    for (const ch of q) {
+      const i = t.indexOf(ch, at);
+      if (i < 0) return best;
+      const start = i === 0 || /[\s:.\-_/›]/.test(t[i - 1]);
+      run = i === at && hits.length ? run + 1 : 0;
+      score += 1 + (start ? 6 : 0) + run * 3 - Math.min(i - at, 6) * 0.3;
+      hits.push(i);
+      at = i + 1;
+    }
+    score -= text.length * 0.02;
+    if (!best || score > best.score) best = { score, hits };
+  }
+  return best;
+}
+
+function match(words, main, more = []) {
+  let score = 0;
+  const hits = [];
+  for (const w of words) {
+    const m = fuzzy(w, main);
+    const o = m ? null : more.map((x) => fuzzy(w, x ?? "")).reduce((a, b) => (b && (!a || b.score > a.score) ? b : a), null);
+    if (!m && !o) return null;
+    score += m ? m.score : o.score - 4;
+    if (m) hits.push(...m.hits);
+  }
+  return { score, hits };
+}
+
 export default class Picker extends View {
   init(_props, cx) {
     this.filter = "";
     this.input = InputState.new({ placeholder: "Go to a tab, space or agent…" });
     this.input.on("change", (_e, cx) => {
       this.filter = this.input.value();
-      this.at = this.filter ? Math.max(0, this.rows().filter(r => r.kind !== "head").findIndex(r => r.kind === "ctx")) : 0;
+      this.at = 0;
       cx.notify();
     });
     this.input.on("submit", (_e, cx) => this.go(this.rows().filter(r => r.kind !== "head")[this.at], cx));
@@ -77,7 +139,7 @@ export default class Picker extends View {
   }
 
   rows() {
-    const f = this.filter.toLowerCase();
+    const words = this.filter.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const all = agents();
     const live = terminals().filter((x) => x.state === "live");
     const teamOf = (addrs) => {
@@ -94,13 +156,26 @@ export default class Picker extends View {
           const name = title(ctx, mine[0]);
           const label = parent ? `${parent.name} › ${name}` : name;
           return { w, ctx, label, mine, team: teamOf(mine.map((a) => a.address)) };
-        })
-        .filter((c) => !f || [w.name, c.label, ...c.mine.map((a) => a.program?.name ?? "")].join(" ").toLowerCase().includes(f));
+        });
       return { w, ctxs };
     });
     const busy = groups.filter((p) => p.w.status && p.ctxs.length);
     const quiet = groups.filter((p) => !p.w.status && p.ctxs.length);
     busy.sort((a, b) => (b.w.status === "blocked") - (a.w.status === "blocked"));
+    const actions = [{ kind: "new" }, { kind: "space", machine: null }, ...this.machines.map((m) => ({ kind: "space", machine: m }))];
+    if (words.length) {
+      const byScore = (a, b) => b.score - a.score;
+      const tabs = [...busy, ...quiet]
+        .flatMap((p) => p.ctxs)
+        .map((c) => {
+          const m = match(words, c.label, [c.w.name, ...c.mine.flatMap((a) => [a.program?.name, clean(a.title), a.address])]);
+          return m && { kind: "ctx", ...c, ...m };
+        })
+        .filter(Boolean)
+        .sort(byScore);
+      const acts = actions.map((r) => { const m = match(words, actionLabel(r)); return m && { ...r, ...m }; }).filter(Boolean).sort(byScore);
+      return tabs.length || acts.length ? [...tabs, ...acts] : actions;
+    }
     const out = [];
     const add = (p) => {
       out.push({ kind: "head", w: p.w });
@@ -109,12 +184,9 @@ export default class Picker extends View {
     busy.forEach(add);
     if (quiet.length) {
       out.push({ kind: "earlier", count: quiet.length });
-      if (this.showEarlier || f) quiet.forEach(add);
+      if (this.showEarlier) quiet.forEach(add);
     }
-    out.push({ kind: "new" });
-    out.push({ kind: "space", machine: null });
-    for (const m of this.machines) out.push({ kind: "space", machine: m });
-    return out;
+    return [...out, ...actions];
   }
 
   go(r, cx) {
@@ -141,6 +213,7 @@ export default class Picker extends View {
     const t = theme();
     const rows = this.rows();
     const pickable = rows.filter((r) => r.kind !== "head");
+    const searching = !!this.filter.trim();
     // Opens on where you are.
     if (this.at === null) this.at = Math.max(0, pickable.findIndex((r) => r.kind === "ctx" && r.w.active && r.ctx.active));
     this.at = Math.min(this.at, pickable.length - 1);
@@ -179,7 +252,7 @@ export default class Picker extends View {
           .text_size(11)
           .font_semibold()
           .text_color(t.dim)
-          .child(h_flex().size(18).rounded(5).bg(spaceColor(t, r.w)).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...r.w.name][0]?.toUpperCase() ?? "?"))
+          .child(chip(t, r.w, 18, 5, 10.5))
           .child(r.w.name);
       }
       if (r.kind === "earlier") {
@@ -200,7 +273,6 @@ export default class Picker extends View {
       }
       const on = r === sel;
       if (r.kind === "new" || r.kind === "space") {
-        const label = r.kind === "new" ? "new tab" : r.machine ? `new space on ${r.machine}` : "new space";
         return h_flex()
           .id(r.kind === "new" ? "pk-new" : `pk-space-${r.machine ?? "here"}`)
           .mx(4)
@@ -216,7 +288,7 @@ export default class Picker extends View {
           .hover((s) => s.bg(t.hover))
           .on_click(() => this.go(r))
           .child(div().w(12).child("+"))
-          .child(label);
+          .child(lit(t, actionLabel(r), r.hits, t.muted));
       }
       const who = r.mine.map((a) => a.program?.name ?? "agent").join(" · ");
       const here = r.w.active && r.ctx.active;
@@ -233,9 +305,10 @@ export default class Picker extends View {
         .hover((s) => s.bg(t.hover))
         .on_click(() => this.go(r))
         .child(this.glyph(t, r.ctx.status))
-        .child(div().flex_1().truncate().text_color(t.foreground).when(here, (d) => d.font_semibold()).child(r.label))
+        .child(lit(t, r.label, r.hits, t.foreground).flex_1().min_w(0).when(here, (d) => d.font_semibold()))
         .when(r.ctx.status === "blocked", (el) => el.child(div().text_size(11).text_color(t.blocked).child("needs you")))
         .when(r.ctx.status === "done", (el) => el.child(div().text_size(11).text_color(t.done).child("finished")))
+        .when(searching, (el) => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.dim).child(chip(t, r.w, 14, 4, 8.5)).child(r.w.name)))
         .child(div().text_size(11).text_color(t.dim).child(who + (r.team ? `  +${r.team}` : "")));
     };
 
