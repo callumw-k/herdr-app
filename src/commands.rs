@@ -70,6 +70,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.unsettle", &[opt("id")], "Bring a settled tab back to the lists."),
     cmd("tab.next", &[], "Show the next tab."),
     cmd("tab.prev", &[], "Show the previous tab."),
+    cmd("tab.next_global", &[], "Show the next tab across all spaces, wrapping from the last space to the first."),
+    cmd("tab.prev_global", &[], "Show the previous tab across all spaces, wrapping from the first space to the last."),
     cmd("pane.zoom", &[opt("pane")], "Show only this pane of its tab, or all again."),
     cmd("pane.focus", &[opt("pane"), opt("terminal")], "Focus a pane (or the pane showing a terminal)."),
     cmd("pane.go", &[req("direction")], "Focus the pane or focusable mod to the \"left\", \"right\", \"up\" or \"down\"."),

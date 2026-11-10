@@ -3282,6 +3282,11 @@ impl AppWindow {
                     }
                 }
             }
+            "tab.next_global" | "tab.prev_global" => {
+                if let Some(id) = self.model.step_tab_global(name == "tab.next_global") {
+                    self.model.select_tab(&id);
+                }
+            }
             // ---- panes
             "pane.split" => {
                 let axis = match Self::arg(a, "direction") {

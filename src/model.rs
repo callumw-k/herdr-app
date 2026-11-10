@@ -690,6 +690,22 @@ impl Model {
         true
     }
 
+    /// The next (or previous) unsettled tab across every space in order,
+    /// wrapping. With no shown tab, it starts from the active space's place.
+    pub fn step_tab_global(&self, forward: bool) -> Option<String> {
+        let all: Vec<&Tab> = self.spaces.iter().flat_map(|p| &p.tabs).collect();
+        let n = all.len();
+        let space = self.active_index()?;
+        let order: Vec<usize> = match self.active_tab().and_then(|c| all.iter().position(|t| t.id == c.id)) {
+            Some(i) => (1..n).map(|k| if forward { (i + k) % n } else { (i + n - k) % n }).collect(),
+            None => {
+                let s: usize = self.spaces[..space].iter().map(|p| p.tabs.len()).sum();
+                (0..n).map(|k| if forward { (s + k) % n } else { (s + n - 1 - k) % n }).collect()
+            }
+        };
+        order.into_iter().map(|i| all[i]).find(|t| t.settled.is_none()).map(|t| t.id.clone())
+    }
+
     /// Selects a tab and its space. Shown again, a settled tab is back.
     pub fn select_tab(&mut self, ctx: &str) -> bool {
         let Some(p) = self.spaces.iter_mut().find(|p| p.tab(ctx).is_some()) else { return false };
@@ -1048,6 +1064,67 @@ mod tests {
         assert_eq!(m.space_name(p, "/home/u"), "api");
         assert_eq!(m.focused_pane().as_deref(), Some("vps/x2"));
         assert!(!m.move_to_new_space("vps/x1", "vps/p2", "vps/c3", "/", None, true), "never over a space that exists");
+    }
+
+    fn three_spaces() -> Model {
+        let mut m = model_with_one();
+        m.add_tab("p1", Tab::new("c2", "", "x2", "t2"));
+        m.add_space("p2", "web", "/src/web", Tab::new("c3", "", "x3", "t3"));
+        m.add_space("p3", "ops", "/src/ops", Tab::new("c4", "", "x4", "t4"));
+        m
+    }
+
+    #[test]
+    fn global_tab_steps_wrap_across_spaces_both_ways() {
+        let mut m = three_spaces();
+        m.select_tab("c2");
+        assert_eq!(m.step_tab_global(true).as_deref(), Some("c3"));
+        assert_eq!(m.step_tab_global(false).as_deref(), Some("c1"));
+        m.select_tab("c4");
+        assert_eq!(m.step_tab_global(true).as_deref(), Some("c1"), "last tab of the last space wraps to the first");
+        m.select_tab("c1");
+        assert_eq!(m.step_tab_global(false).as_deref(), Some("c4"), "first tab of the first space wraps to the last");
+    }
+
+    #[test]
+    fn global_tab_steps_skip_settled_tabs() {
+        let mut m = three_spaces();
+        m.select_tab("c3");
+        assert!(m.settle("c3", 1));
+        assert_eq!(m.active.as_deref(), Some("p2"));
+        assert_eq!(m.step_tab_global(true).as_deref(), Some("c4"), "a space whose only tab is settled steps out of it");
+        assert_eq!(m.step_tab_global(false).as_deref(), Some("c2"));
+        m.select_tab("c2");
+        assert_eq!(m.step_tab_global(true).as_deref(), Some("c4"));
+        m.select_tab("c4");
+        assert!(m.settle("c1", 2));
+        assert_eq!(m.step_tab_global(true).as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn global_tab_steps_start_from_a_tabless_space_place() {
+        let mut m = three_spaces();
+        m.spaces[1].tabs.clear();
+        m.spaces[1].active = None;
+        m.active = Some("p2".into());
+        assert_eq!(m.step_tab_global(true).as_deref(), Some("c4"));
+        assert_eq!(m.step_tab_global(false).as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn global_tab_steps_need_another_tab() {
+        let m = model_with_one();
+        assert_eq!(m.step_tab_global(true), None);
+        assert_eq!(m.step_tab_global(false), None);
+        let mut m = three_spaces();
+        for c in ["c1", "c2", "c3"] {
+            m.settle(c, 1);
+        }
+        m.select_tab("c4");
+        assert_eq!(m.step_tab_global(true), None, "every other tab settled");
+        assert_eq!(Model::default().step_tab_global(true), None);
+        m.spaces.iter_mut().for_each(|p| p.tabs.clear());
+        assert_eq!(m.step_tab_global(false), None, "spaces without tabs");
     }
 
     fn add_child(m: &mut Model, id: &str, parent: &str) -> bool {

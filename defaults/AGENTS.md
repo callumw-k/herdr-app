@@ -623,9 +623,10 @@ The main ones:
   in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
   closes its space and asks first unless confirmed),
   `tab.rename {id?, name}` ("": its number again), `tab.move {id, index}`,
-  `tab.select {index | id}`, `tab.next`, `tab.prev`,
-  `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
-  skip settled tabs), `tab.arrange {arrangement?, tab?}` (`vertical`,
+  `tab.select {index | id}`, `tab.next`, `tab.prev`, `tab.next_global`,
+  `tab.prev_global` (every tab of every space in order, wrapping),
+  `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev, global or
+  not, skip settled tabs), `tab.arrange {arrangement?, tab?}` (`vertical`,
   `horizontal`, `grid`, `stacked`, `next` (default), `prev`, or `none`; default
   tab: the focused one, or the floats while they hold the keyboard).
 - Floats: `float.new {argv?, folder?, space?}`, `float.toggle {space?}` (none:

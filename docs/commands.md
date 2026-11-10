@@ -296,6 +296,18 @@ Show the previous tab.
 
 No arguments.
 
+## `tab.next_global`
+
+Show the next tab across all spaces, wrapping from the last space to the first.
+
+No arguments.
+
+## `tab.prev_global`
+
+Show the previous tab across all spaces, wrapping from the first space to the last.
+
+No arguments.
+
 ## `pane.zoom`
 
 Show only this pane of its tab, or all again.

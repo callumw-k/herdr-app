@@ -27,6 +27,8 @@ const NAMED = [
   ["tab.close", {}, "Tab", "Close tab", "tab kill"],
   ["tab.next", {}, "Tab", "Next tab", "tab"],
   ["tab.prev", {}, "Tab", "Previous tab", "tab"],
+  ["tab.next_global", {}, "Tab", "Next tab in any space", "tab global all spaces"],
+  ["tab.prev_global", {}, "Tab", "Previous tab in any space", "tab global all spaces"],
   ["pane.split", { direction: "right" }, "Pane", "Split right", "vertical"],
   ["pane.split", { direction: "down" }, "Pane", "Split down", "horizontal"],
   ["pane.close", {}, "Pane", "Close pane", "kill"],
