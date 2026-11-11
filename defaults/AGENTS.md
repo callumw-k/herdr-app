@@ -817,6 +817,8 @@ What's about the user, never a look:
   `"grid"` (default), `"stacked"`, or `"none"` (split by hand). Existing tabs keep theirs.
 - `float_width`, `float_height`: the floats' box over the tab area, up to `1` a
   share of it (default `0.9`), above `1` px at zoom 1.
+- `float_dim`: how dark the tab behind the floats goes while they hold the
+  keyboard, `0` (off) to `1` (default `0.35`).
 - `repos`: folders that each own a space (see pinned spaces under The model),
   `[{"path": "~/code/herdr"}, {"path": "~/code/projects", "children": true},
   {"path": "/srv/api", "machine": "vps"}]`. `children`: a projects folder,

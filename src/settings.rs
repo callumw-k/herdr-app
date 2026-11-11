@@ -409,6 +409,8 @@ pub struct Person {
     /// The floats' size over the tab area: up to 1 a share of it, above 1 px.
     pub float_width: f32,
     pub float_height: f32,
+    /// 0..1: how dark the tab behind the floats goes while they hold the keyboard.
+    pub float_dim: f32,
     /// Repos that each own a space, made the first time a shell goes into one (follow.rs).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<Repo>,
@@ -482,6 +484,7 @@ impl Default for Person {
             arrangement: "grid".into(),
             float_width: 0.9,
             float_height: 0.9,
+            float_dim: 0.35,
             repos: Vec::new(),
         }
     }
@@ -521,6 +524,7 @@ pub struct Settings {
     pub arrangement: String,
     pub float_width: f32,
     pub float_height: f32,
+    pub float_dim: f32,
     pub repos: Vec<Repo>,
 }
 
@@ -567,6 +571,7 @@ impl Default for Settings {
             arrangement: "grid".into(),
             float_width: 0.9,
             float_height: 0.9,
+            float_dim: 0.35,
             repos: Vec::new(),
         }
     }
@@ -609,6 +614,7 @@ impl Settings {
             arrangement: person.arrangement.clone(),
             float_width: person.float_width,
             float_height: person.float_height,
+            float_dim: person.float_dim,
             repos: person.repos.clone(),
         }
     }
@@ -672,6 +678,9 @@ impl Settings {
             if v.is_nan() || v <= 0.0 {
                 out.push(format!("{k} {v} must be above 0: up to 1 a share of the tab area, above 1 px"));
             }
+        }
+        if !(0.0..=1.0).contains(&self.float_dim) {
+            out.push(format!("float_dim {} is outside 0..1", self.float_dim));
         }
         for r in &self.repos {
             let path = r.path.trim();

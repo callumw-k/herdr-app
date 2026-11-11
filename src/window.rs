@@ -4421,7 +4421,7 @@ impl AppWindow {
     }
 
     /// The space's floats over its tab: a box in the middle of the tab area.
-    fn render_float_layer(&self, floats: &Tab, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_float_layer(&self, floats: &Tab, dim: bool, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
         let s = settings::get();
         let span = |v: f32| if v <= 1.0 { relative(v) } else { settings::z(v).into() };
         let (w, h): (DefiniteLength, DefiniteLength) = (span(s.float_width), span(s.float_height));
@@ -4437,7 +4437,15 @@ impl AppWindow {
             .shadow_lg()
             .occlude()
             .child(self.render_tab(floats, focused, cx));
-        div().absolute().inset_0().flex().items_center().justify_center().child(body).into_any_element()
+        div()
+            .absolute()
+            .inset_0()
+            .when(dim, |d| d.bg(hsla(0.0, 0.0, 0.0, s.float_dim.clamp(0.0, 1.0))))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(body)
+            .into_any_element()
     }
 
     /// A pane in its frame: the look, and the header mod above or below it
@@ -4577,8 +4585,12 @@ impl AppWindow {
             Content::Context { .. } => match self.model.active_tab() {
                 Some(c) => {
                     let tab = self.render_tab(c, focused, cx);
-                    match self.model.active_space().and_then(|p| p.shown_floats()).filter(|f| !f.root.panes().is_empty()) {
-                        Some(f) => div().size_full().relative().flex().child(tab).child(self.render_float_layer(f, focused, cx)).into_any_element(),
+                    let space = self.model.active_space();
+                    match space.and_then(|p| p.shown_floats()).filter(|f| !f.root.panes().is_empty()) {
+                        Some(f) => {
+                            let dim = space.is_some_and(|p| p.floats_focused);
+                            div().size_full().relative().flex().child(tab).child(self.render_float_layer(f, dim, focused, cx)).into_any_element()
+                        }
                         None => tab,
                     }
                 }
